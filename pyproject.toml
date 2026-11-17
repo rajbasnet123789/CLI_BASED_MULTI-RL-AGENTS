@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orion-ai"
-version = "1.0.0"
+version = "1.0.1"
 description = "Orion AI - a multi-agent coding assistant for your terminal, powered by Gemini or local Ollama models, LangGraph, and ChromaDB."
 readme = "README.md"
 license = { text = "MIT" }
