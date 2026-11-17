@@ -576,8 +576,9 @@ def doctor_cmd(
     ):
         try:
             imported = importlib.import_module(module)
-            version = getattr(imported, "__version__", "") or "ok"
-            table.add_row(label, f"[green]ok[/green] {version}")
+            version = getattr(imported, "__version__", "")
+            detail = f" {version}" if version else ""
+            table.add_row(label, f"[green]ok[/green]{detail}")
         except Exception as exc:
             table.add_row(
                 label, f"[red]import failed[/red] {truncate(str(exc), 140, 'error')}"
