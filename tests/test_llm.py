@@ -17,6 +17,7 @@ from orion.llm import (
     LocalLLM,
     Usage,
     build_llm,
+    detect_vertex_project,
     normalize_model,
 )
 
@@ -27,6 +28,17 @@ def test_model_aliases() -> None:
     assert normalize_model("flash-lite") == "gemini-3.5-flash-lite"
     assert normalize_model("models/gemini-2.0-flash") == "gemini-2.0-flash"
     assert normalize_model("custom-model") == "custom-model"
+
+
+def test_vertex_project_falls_back_to_adc_quota_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("orion.llm._gcloud_config_project", lambda: None)
+    for key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "PROJECT_ID"):
+        monkeypatch.delenv(key, raising=False)
+    credentials = SimpleNamespace(quota_project_id="project-6a0ab983-d480-4954-99f")
+    assert detect_vertex_project(credentials, None) == "project-6a0ab983-d480-4954-99f"
+    assert detect_vertex_project(credentials, "direct-project") == "direct-project"
 
 
 def test_usage_accumulates() -> None:

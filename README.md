@@ -41,9 +41,9 @@ Python library, and an optional HTTP API.
 From a built wheel:
 
 ```bash
-pip install orion_ai-1.0.5-py3-none-any.whl
+pip install orion_ai-1.0.6-py3-none-any.whl
 # or directly from GitHub:
-pip install https://raw.githubusercontent.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/main/dist/orion_ai-1.0.5-py3-none-any.whl
+pip install https://raw.githubusercontent.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/main/dist/orion_ai-1.0.6-py3-none-any.whl
 ```
 
 If you already have an older Orion installed, use
@@ -131,6 +131,12 @@ orion run "find the cause of the failing test" --mode build
 
 Launch with `orion` (or `orion tui`). The TUI is a thin layer over the same
 engine used by the CLI.
+
+**Orion works in the directory you launch it from.** `cd` into your project
+first, then run `py -3.10 -m orion`. In build mode (the default) prompts create
+and edit files there and run project commands with that directory as the working
+directory. The welcome panel and sidebar show the active directory. Use
+`-C "D:\path\to\project"` to target another directory without `cd`.
 
 | Key | Action |
 | --- | --- |
@@ -238,7 +244,7 @@ orion serve --host 0.0.0.0 --port 8765
 
 ```bash
 cp .env.example .env
-docker build -t orion-ai:1.0.5 .
+docker build -t orion-ai:1.0.6 .
 docker compose run --rm orion                 # TUI
 docker compose run --rm orion run "add tests" # headless
 docker compose --profile api up api           # API on :8765
@@ -324,7 +330,7 @@ make test        # pytest
 make lint        # ruff check src tests
 make fmt         # ruff format + autofix
 make build       # python -m build → dist/
-make docker      # docker build -t orion-ai:1.0.5 .
+make docker      # docker build -t orion-ai:1.0.6 .
 ```
 
 The test suite runs without network access: agent orchestration is exercised

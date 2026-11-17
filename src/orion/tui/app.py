@@ -48,6 +48,7 @@ LOGO = """\
 
 WELCOME = (
     "Multi-agent coding assistant · Vertex AI + LangGraph + ChromaDB\n"
+    "Works in the directory below: creates files and runs project commands there.\n"
     "Type a task and press Enter. Tab toggles plan/build. Ctrl+P opens commands."
 )
 

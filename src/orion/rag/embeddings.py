@@ -129,11 +129,21 @@ class LocalHashEmbedder:
 
 
 def build_embedder(config: OrionConfig, llm: LLM | None = None) -> Embedder:
-    """Pick the configured embedding backend."""
+    """Pick the configured embedding backend.
+
+    The default ADC/gcloud setup uses deterministic local vectors so Orion works
+    from any directory without a project ``.env`` and without a separate
+    embedding API. Hosted embeddings are used only when explicitly requested
+    (``ORION_EMBEDDINGS=gemini``) or by the legacy key-based Gemini provider.
+    """
     if config.embeddings == "local" or config.is_local:
         return LocalHashEmbedder()
-    if config.embeddings == "gemini" or config.has_api_key or config.is_gcloud:
+    if config.embeddings == "gemini":
         return GeminiEmbedder(llm or build_llm(config))
+    if config.embeddings == "auto":
+        if config.llm_provider == "gemini" and config.has_api_key:
+            return GeminiEmbedder(llm or build_llm(config))
+        return LocalHashEmbedder()
     return LocalHashEmbedder()
 
 

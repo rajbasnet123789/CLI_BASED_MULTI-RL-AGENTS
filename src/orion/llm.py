@@ -17,6 +17,7 @@ All backends expose the same small interface: ``generate``, ``stream``,
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from orion.config import OrionConfig
@@ -653,6 +655,52 @@ GCLOUD_MODEL_FALLBACKS: dict[str, str] = {
 }
 
 
+def _gcloud_config_project() -> str | None:
+    """Read the project from the local gcloud CLI configuration, if present."""
+    roots: list[Path] = []
+    configured = os.environ.get("CLOUDSDK_CONFIG")
+    if configured:
+        roots.append(Path(configured).expanduser())
+    roots.append(Path.home() / ".config" / "gcloud")
+    for root in roots:
+        for filename in ("config_default", "config"):
+            path = root / "configurations" / filename
+            if not path.is_file():
+                continue
+            try:
+                section: str | None = None
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("[") and stripped.endswith("]"):
+                        section = stripped[1:-1].strip().lower()
+                    elif section == "core" and "=" in stripped:
+                        key, value = stripped.split("=", 1)
+                        if key.strip().lower() == "project" and value.strip():
+                            return value.strip()
+            except OSError:
+                continue
+    return None
+
+
+def detect_vertex_project(credentials: Any, adc_project: str | None = None) -> str | None:
+    """Find a Vertex project without requiring a per-directory ``.env``.
+
+    ``gcloud auth application-default login`` writes user credentials that do
+    not always carry the project, but the quota project is usually present.
+    """
+    for candidate in (
+        adc_project,
+        getattr(credentials, "quota_project_id", None),
+        os.environ.get("GOOGLE_CLOUD_PROJECT"),
+        os.environ.get("GCLOUD_PROJECT"),
+        os.environ.get("PROJECT_ID"),
+        _gcloud_config_project(),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 class GCloudLLM(GeminiLLM):
     """Vertex AI through local gcloud Application Default Credentials.
 
@@ -766,7 +814,9 @@ class GCloudLLM(GeminiLLM):
                 f"{self.config.gcloud_project or '(detected from ADC)'}"
             ) from exc
 
-        project = self.config.gcloud_project or detected_project
+        project = self.config.gcloud_project or detect_vertex_project(
+            credentials, detected_project
+        )
         if not project:
             raise LLMError(
                 "No Google Cloud project is configured. Set ORION_GCLOUD_PROJECT or run:\n"
