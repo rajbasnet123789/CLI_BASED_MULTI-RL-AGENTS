@@ -41,9 +41,9 @@ Python library, and an optional HTTP API.
 From a built wheel:
 
 ```bash
-pip install orion_ai-1.0.6-py3-none-any.whl
+pip install orion_ai-1.0.7-py3-none-any.whl
 # or directly from GitHub:
-pip install https://raw.githubusercontent.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/main/dist/orion_ai-1.0.6-py3-none-any.whl
+pip install https://raw.githubusercontent.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/main/dist/orion_ai-1.0.7-py3-none-any.whl
 ```
 
 If you already have an older Orion installed, use
@@ -244,7 +244,7 @@ orion serve --host 0.0.0.0 --port 8765
 
 ```bash
 cp .env.example .env
-docker build -t orion-ai:1.0.6 .
+docker build -t orion-ai:1.0.7 .
 docker compose run --rm orion                 # TUI
 docker compose run --rm orion run "add tests" # headless
 docker compose --profile api up api           # API on :8765
@@ -330,7 +330,7 @@ make test        # pytest
 make lint        # ruff check src tests
 make fmt         # ruff format + autofix
 make build       # python -m build → dist/
-make docker      # docker build -t orion-ai:1.0.6 .
+make docker      # docker build -t orion-ai:1.0.7 .
 ```
 
 The test suite runs without network access: agent orchestration is exercised

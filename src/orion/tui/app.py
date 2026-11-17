@@ -414,7 +414,7 @@ class OrionApp(App[None]):
         model = str(event.get("model", ""))
         label = f"{agent} · {model}" if model else agent
         message = AssistantMessage(agent=label, text=text)
-        self._messages.mount(message)
+        self._after_mount(message)
         message.finalize()
 
     def _ev_plan(self, event: dict[str, Any]) -> None:
@@ -524,6 +524,17 @@ class OrionApp(App[None]):
                 self._set_status(f"done in {elapsed}")
         else:
             self._set_status("done")
+        changes = self._last_result.changes if self._last_result is not None else []
+        if changes:
+            lines = ["**Files changed in this run**"]
+            for change in changes:
+                lines.append(
+                    f"- `{change.get('action', 'update')}` `{change.get('path', '')}`"
+                )
+            lines.extend(["", "Use `/diff` to re-open all diffs."])
+            self._after_mount(
+                AssistantMessage(agent="changes", text="\n".join(lines))
+            ).finalize()
         self._refresh_sidebar()
         self._refresh_topbar()
 

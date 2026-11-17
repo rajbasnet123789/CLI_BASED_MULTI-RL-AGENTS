@@ -9,7 +9,7 @@
 #   make clean     remove caches and build artifacts
 
 PYTHON ?= python
-IMAGE ?= orion-ai:1.0.6
+IMAGE ?= orion-ai:1.0.7
 
 .PHONY: help install install-dev test lint fmt build docker run clean
 

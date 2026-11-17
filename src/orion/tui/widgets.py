@@ -258,11 +258,41 @@ class ToolCallView(Collapsible):
     def __init__(self, name: str, args: dict[str, Any], call_id: str, **kwargs: Any) -> None:
         self.tool_name = name
         self.call_id = call_id
-        self._body = Static(Text("running…", style="dim"), classes="tool-body")
+        self._args = dict(args)
+        preview = self._preview(name, args)
+        self._body_text = preview + "\n\nrunning…"
+        self._body = Static(Text(self._body_text, style="#9ca3af"), classes="tool-body")
         summary = self._summarize(name, args)
         title = Text.assemble(("⚙ ", "#a78bfa"), (name, "bold #c4b5fd"), (f"  {summary}", "#6b7280"))
-        super().__init__(self._body, title=title, collapsed=True, **kwargs)
+        # Expanded by default: the transcript should show what each tool did,
+        # not just a collapsed one-line title.
+        super().__init__(self._body, title=title, collapsed=False, **kwargs)
         self.add_class("tool-view")
+
+    @staticmethod
+    def _preview(name: str, args: dict[str, Any]) -> str:
+        """Show the actual command/path/content before the result arrives."""
+        if name == "run_command":
+            return f"$ {truncate(str(args.get('command', '')), 400, 'command')}"
+        if name in {"read_file", "write_file", "edit_file", "delete_file"}:
+            path = str(args.get("path", ""))
+            content = str(args.get("content", ""))
+            if content:
+                return f"path: {path}\n\n{truncate(content, 2500, 'file content')}"
+            old = str(args.get("old_string", ""))
+            new = str(args.get("new_string", ""))
+            if old or new:
+                return (
+                    f"path: {path}\n\n- {truncate(old, 1200, 'old string')}\n"
+                    f"+ {truncate(new, 1200, 'new string')}"
+                )
+            return f"path: {path}"
+        try:
+            return truncate(
+                json.dumps(args, indent=2, ensure_ascii=False), 2500, "tool arguments"
+            )
+        except (TypeError, ValueError):
+            return truncate(str(args), 2500, "tool arguments")
 
     @staticmethod
     def _summarize(name: str, args: dict[str, Any]) -> str:
@@ -287,8 +317,11 @@ class ToolCallView(Collapsible):
             (self.tool_name, f"bold {color}"),
             (f"  {display}", "#6b7280"),
         )
+        preview = self._preview(self.tool_name, self._args)
         body = truncate(content, 5000, "tool output") or "(no output)"
-        self._body.update(Text(body, style="#9ca3af"))
+        self._body_text = f"{preview}\n\n→ {display}\n{body}"
+        self._body.update(Text(self._body_text, style="#9ca3af"))
+        self.collapsed = False
 
 
 class ApprovalModal(ModalScreen[str]):
