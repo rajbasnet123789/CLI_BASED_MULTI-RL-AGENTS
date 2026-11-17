@@ -7,7 +7,7 @@ extra and runs as an unprivileged user (`uid 1000`).
 
 ```bash
 cp .env.example .env      # add GEMINI_API_KEY
-docker build -t orion-ai:1.0.4 .
+docker build -t orion-ai:1.0.5 .
 ```
 
 The build context excludes `.env`, `.orion/`, `.venv/`, tests, and docs (see
@@ -61,7 +61,7 @@ docker run --rm -it \
   -v "$PWD:/workspace" \
   -v "$PWD/.env:/workspace/.env:ro" \
   -w /workspace \
-  orion-ai:1.0.4 run "fix the failing test"
+  orion-ai:1.0.5 run "fix the failing test"
 ```
 
 ## Notes

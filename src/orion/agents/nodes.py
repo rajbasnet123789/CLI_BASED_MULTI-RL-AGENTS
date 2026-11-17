@@ -119,6 +119,16 @@ class AgentRuntime:
         )
         self.usage.add(response.prompt_tokens, response.output_tokens)
         self.event("usage", usage=self.usage.as_dict(), agent=agent)
+        if (response.text or "").strip():
+            self.event(
+                "model_output",
+                agent=agent,
+                model=response.model or model or self.config.model_for(agent),
+                text=truncate(response.text, 12_000, "model output"),
+                call=self.usage.calls,
+                prompt_tokens=response.prompt_tokens,
+                output_tokens=response.output_tokens,
+            )
         return response
 
     def stream(
@@ -156,7 +166,16 @@ class AgentRuntime:
             calls=max(0, after[2] - before[2]),
         )
         self.event("usage", usage=self.usage.as_dict(), agent=agent)
-        return "".join(chunks).strip()
+        text = "".join(chunks).strip()
+        if text:
+            self.event(
+                "model_output",
+                agent=agent,
+                model=model or self.config.model_for(agent),
+                text=truncate(text, 12_000, "model output"),
+                call=self.usage.calls,
+            )
+        return text
 
     def run_tool_loop(
         self,

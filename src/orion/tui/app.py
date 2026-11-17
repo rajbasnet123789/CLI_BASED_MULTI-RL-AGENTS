@@ -403,6 +403,19 @@ class OrionApp(App[None]):
         self._messages.mount(message)
         message.finalize()
 
+    def _ev_model_output(self, event: dict[str, Any]) -> None:
+        """Show the raw answer from every agent/model call in the transcript."""
+        self._finalize_active()
+        text = str(event.get("text", ""))
+        if not text.strip():
+            return
+        agent = str(event.get("agent", "agent"))
+        model = str(event.get("model", ""))
+        label = f"{agent} · {model}" if model else agent
+        message = AssistantMessage(agent=label, text=text)
+        self._messages.mount(message)
+        message.finalize()
+
     def _ev_plan(self, event: dict[str, Any]) -> None:
         self._finalize_active()
         markdown = str(event.get("markdown", ""))
