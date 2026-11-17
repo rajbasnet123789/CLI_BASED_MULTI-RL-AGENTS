@@ -1,0 +1,50 @@
+# Orion AI - Docker Compose
+#
+#   docker compose run --rm orion            # interactive TUI
+#   docker compose run --rm orion run "add tests for the parser"
+#   docker compose --profile api up api      # HTTP API on :8765
+#
+# The project directory is mounted at /workspace so Orion can read and edit
+# your code. The Gemini key comes from `.env` (copy `.env.example` first).
+
+services:
+  orion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orion-ai:1.0.0
+    env_file:
+      - .env
+    environment:
+      ORION_DATA_DIR: /workspace/.orion
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    entrypoint: ["orion"]
+    command: ["tui"]
+
+  api:
+    profiles: ["api"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orion-ai:1.0.0
+    env_file:
+      - .env
+    environment:
+      ORION_DATA_DIR: /workspace/.orion
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    ports:
+      - "8765:8765"
+    entrypoint: ["orion"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

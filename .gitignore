@@ -1,0 +1,43 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Orion runtime data
+.orion/
+.orion-data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Legacy local backend (contains its own virtualenv)
+backend/.venv/
+
+# Generated test projects
+*.db
+*.sqlite3
+node_modules/
+website-test/.venv-test/
+website-test/frontend/dist/
