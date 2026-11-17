@@ -8,34 +8,60 @@ Orion reads configuration from, in order of increasing priority:
 4. `ORION_*` environment variables.
 5. Explicit constructor arguments or CLI flags.
 
-The Gemini key itself may be supplied as `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
-`ORION_GEMINI_API_KEY`.
+Orion uses **Vertex AI via gcloud Application Default Credentials** by default.
+No user API key is required. The legacy `gemini`/`local` providers remain in the
+code for compatibility but are not part of the default setup.
 
 ## LLM provider
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ORION_LLM_PROVIDER` | `gemini` | `gemini` uses `google-genai`; `local` uses an OpenAI-compatible endpoint (Ollama) and needs no key. |
-| `ORION_LOCAL_BASE_URL` | `http://localhost:11434/v1` | Ollama's OpenAI-compatible base URL. |
-| `ORION_LOCAL_MODEL` | `qwen2.5:7b-instruct` | Model tag sent to the local server. Use `qwen2.5:3b-instruct` on smaller GPUs. |
-| `ORION_LOCAL_API_KEY` | — | Optional bearer token if your local gateway requires one. |
-| `ORION_LOCAL_TIMEOUT` | `120` | Request timeout in seconds. |
+| `ORION_LLM_PROVIDER` | `gcloud` | Vertex AI via gcloud ADC (no API key). `gemini`/`local` are legacy compatibility paths. |
+| `ORION_GCLOUD_PROJECT` | — | GCP project ID. Aliases: `PROJECT_ID`, `GCLOUD_PROJECT`, `GOOGLE_CLOUD_PROJECT`. |
+| `ORION_GCLOUD_REGION` | `global` | Vertex endpoint region/location. Aliases: `REGION`, `GCLOUD_REGION`, `GOOGLE_CLOUD_REGION`. |
+| `ORION_GCLOUD_ENDPOINT` | `aiplatform.googleapis.com` | Global Vertex endpoint. Aliases: `ENDPOINT`, `GCLOUD_ENDPOINT`. |
 
-In `local` mode Orion posts to `{ORION_LOCAL_BASE_URL}/chat/completions`, converts
-tool calls to/from the OpenAI function-call shape, and uses the offline hash
-embedder. `ORION_MODEL` keeps its Gemini default for backwards compatibility;
-local mode substitutes `ORION_LOCAL_MODEL` whenever the configured model is a
-Gemini name or alias. **No API key or embedding API call is needed.**
+In `gcloud` mode Orion authenticates with local Application Default Credentials
+and calls the **global** Vertex AI endpoint. No `GEMINI_API_KEY` is used. Enable
+the Vertex AI API in the project and grant your account `roles/aiplatform.user`.
+Use `global` for generation; regional endpoints such as `us-east5` return
+`404/NOT_FOUND` for the models Orion uses on many projects.
 
 ```bash
-ollama pull qwen2.5:7b-instruct
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
 ```
 
 ```dotenv
-ORION_LLM_PROVIDER=local
-ORION_LOCAL_BASE_URL=http://localhost:11434/v1
-ORION_LOCAL_MODEL=qwen2.5:7b-instruct
+ORION_LLM_PROVIDER=gcloud
+ORION_GCLOUD_PROJECT=YOUR_PROJECT_ID
+ORION_GCLOUD_REGION=global
+ORION_GCLOUD_ENDPOINT=aiplatform.googleapis.com
+ORION_MODEL=gemini-3.5-flash
 ```
+
+`orion config`, `orion status`, the TUI, and run headers show the effective
+`active_model`.
+
+### Role-based model allocation
+
+Each agent can use a different Vertex model. The exact requested allocation is:
+
+| Variable | Role | Model |
+| --- | --- | --- |
+| `ORION_ARCHITECT_MODEL` | Principal architect (analysis, architecture, plan) | `claude-opus-5-5` |
+| `ORION_GENERATOR_MODEL` | Task decomposition and initial code generation | `glm-5-maas` |
+| `ORION_EVALUATOR_MODEL` | Code evaluator (with real verification signals) | `claude-opus-5-5` |
+| `ORION_REVIEWER_MODEL` | Code reviewer | `gemini-3-flash-preview` |
+| `ORION_DEBUGGING_MODEL` | Debugging agent | `glm-5-maas` |
+| `ORION_SUMMARIZER_MODEL` | Context summarization | `gemini-flash-lite` |
+
+If Vertex returns `404/NOT_FOUND` (e.g. Claude without Model Garden access, or
+GLM-5 retired on Vertex), Orion automatically tries the next model in
+`GCLOUD_MODEL_FALLBACKS` in `src/orion/llm.py`. This keeps a fresh install working
+without extra keys or manual edits. `ORION_MODEL` is the fallback for roles with
+no explicit override. The legacy `ORION_PLANNER_MODEL`/`ORION_CODER_MODEL`/
+`ORION_REVIEWER_MODEL` variables remain as aliases.
 
 ## Credentials
 
@@ -44,24 +70,21 @@ ORION_LOCAL_MODEL=qwen2.5:7b-instruct
 | `GEMINI_API_KEY` | — | Google AI Studio (`AIza...`) or Vertex express (`AQ....`); Gemini provider only. |
 | `ORION_VERTEX` | `auto` | `auto` detects from the key prefix; `true`/`false` force the mode. |
 
-In `auto` mode Orion infers the backend from the key prefix: `AQ.` keys use
-`google-genai` in Vertex express mode and `AIza` keys use the standard Gemini
-API. Prefixes are only a hint — if the chosen backend rejects the key (for
-example, the Vertex AI API is disabled on the key's project), Orion retries the
-request once with the other backend and pins the working mode for the rest of
-the process. Set `ORION_VERTEX=false` to force Google AI Studio or
-`ORION_VERTEX=true` to force Vertex AI when the guess is wrong or you want to
-skip the extra round trip.
+The `GEMINI_API_KEY`/`ORION_VERTEX` settings apply only to the legacy
+`ORION_LLM_PROVIDER=gemini` path. The default gcloud/Vertex path ignores them.
 
 ## Models
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ORION_MODEL` | `gemini-3.5-flash` | Default for every agent in Gemini mode. Aliases: `flash`, `pro`, `flash-lite`, `3.5-flash`, `3.5-flash-lite`, `3.1-pro`, `2.5-flash`, `2.5-flash-lite`, `2.5-pro`, `2.0-flash`. Local mode uses `ORION_LOCAL_MODEL`. |
-| `ORION_PLANNER_MODEL` | unset | Override for the planner. |
-| `ORION_CODER_MODEL` | unset | Override for the coder. |
-| `ORION_REVIEWER_MODEL` | unset | Override for the reviewer. |
-| `ORION_EMBEDDING_MODEL` | `gemini-embedding-001` | Gemini embedding model. |
+| `ORION_MODEL` | `gemini-3.5-flash` | Fallback model for roles without an override. Aliases: `flash`, `pro`, `flash-lite`, `3.5-flash`, `3.5-flash-lite`, `3.1-pro`. |
+| `ORION_ARCHITECT_MODEL` | `claude-opus-5-5` | Principal architect. |
+| `ORION_GENERATOR_MODEL` | `glm-5-maas` | Task decomposition / code generation. |
+| `ORION_EVALUATOR_MODEL` | `claude-opus-5-5` | Code evaluator. |
+| `ORION_REVIEWER_MODEL` | `gemini-3-flash-preview` | Code reviewer. |
+| `ORION_DEBUGGING_MODEL` | `glm-5-maas` | Debugging agent. |
+| `ORION_SUMMARIZER_MODEL` | `gemini-flash-lite` | Context summarization. |
+| `ORION_EMBEDDING_MODEL` | `text-embedding-005` | Vertex embedding model (used when `ORION_EMBEDDINGS=gemini`). |
 | `ORION_TEMPERATURE` | `0.2` | `0.0`–`2.0`. |
 | `ORION_MAX_OUTPUT_TOKENS` | `8192` | Per response. |
 
@@ -71,7 +94,7 @@ skip the extra round trip.
 | --- | --- | --- |
 | `ORION_MODE` | `build` | `build` or `plan`. |
 | `ORION_APPROVAL` | `ask` | `ask`, `auto`, `deny`. |
-| `ORION_MAX_ITERATIONS` | `3` | Reviewer → debugger → coder loops. |
+| `ORION_MAX_ITERATIONS` | `3` | Evaluator → debugger → generator loops. |
 | `ORION_MAX_TOOL_ROUNDS` | `12` | Tool rounds per agent turn. |
 | `ORION_DRY_RUN` | `false` | Record changes without writing. |
 | `ORION_AUTO_INDEX` | `true` | Refresh the index before a run. |
@@ -82,15 +105,16 @@ skip the extra round trip.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ORION_EMBEDDINGS` | `auto` | `gemini`, `local`, or `auto` (Gemini when the provider is Gemini and a key exists, otherwise local). Local provider always uses `local`. |
+| `ORION_EMBEDDINGS` | `local` | `local` (offline hashing, default), `gemini` (Vertex embeddings via ADC), or `auto`. |
 | `ORION_TOP_K` | `8` | Chunks retrieved per run (`1`–`50`). |
 | `ORION_CHUNK_CHARS` | `1200` | Chunk size (minimum `200`). |
 | `ORION_CHUNK_OVERLAP` | `150` | Must be smaller than `ORION_CHUNK_CHARS`. |
 | `ORION_MAX_FILE_BYTES` | `512000` | Skip larger files. |
 
-The offline `local` embedder is deterministic and requires no API key, which is
-useful for tests, air-gapped machines, and CI. It is automatically selected when
-`ORION_LLM_PROVIDER=local`, even if `ORION_EMBEDDINGS=gemini` is set.
+The offline `local` embedder is deterministic and requires no API key. It is the
+default so existing indexes (built with `local-hash-v1`) remain compatible. Set
+`ORION_EMBEDDINGS=gemini` to use Vertex embeddings through the same ADC
+credentials.
 
 ## Storage and paths
 

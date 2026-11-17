@@ -23,7 +23,23 @@ Mode = Literal["build", "plan"]
 ApprovalPolicy = Literal["ask", "auto", "deny"]
 EmbeddingBackend = Literal["auto", "gemini", "local"]
 VertexMode = Literal["auto", "true", "false"]
-LLMProvider = Literal["gemini", "local"]
+LLMProvider = Literal["gemini", "gcloud", "local"]
+# Gemini names/aliases are treated as "use the configured local model" sentinels
+# when ORION_LLM_PROVIDER=local. Kept here to avoid importing the LLM layer.
+GEMINI_MODEL_ALIASES = frozenset(
+    {
+        "flash",
+        "pro",
+        "flash-lite",
+        "3.5-flash",
+        "3.5-flash-lite",
+        "3.1-pro",
+        "2.5-flash",
+        "2.5-flash-lite",
+        "2.5-pro",
+        "2.0-flash",
+    }
+)
 
 DEFAULT_IGNORE: list[str] = [
     ".git",
@@ -152,23 +168,61 @@ class OrionConfig(BaseSettings):
     vertex: VertexMode = "auto"
 
     # LLM provider --------------------------------------------------------
-    # Gemini remains the default. "local" uses an OpenAI-compatible server such
-    # as Ollama and needs no API key.
-    llm_provider: LLMProvider = "gemini"
+    # Vertex AI via gcloud ADC is the default: users never set an API key.
+    # "gemini" (AI Studio/express key) and "local" remain for compatibility.
+    llm_provider: LLMProvider = "gcloud"
+
+    # gcloud / Vertex AI (ADC) --------------------------------------------
+    # No API key: uses `gcloud auth application-default login` credentials.
+    gcloud_project: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ORION_GCLOUD_PROJECT",
+            "GCLOUD_PROJECT",
+            "GOOGLE_CLOUD_PROJECT",
+            "PROJECT_ID",
+        ),
+    )
+    gcloud_region: str = Field(
+        default="global",
+        validation_alias=AliasChoices(
+            "ORION_GCLOUD_REGION",
+            "GCLOUD_REGION",
+            "GOOGLE_CLOUD_REGION",
+            "REGION",
+        ),
+    )
+    gcloud_endpoint: str = Field(
+        default="aiplatform.googleapis.com",
+        validation_alias=AliasChoices(
+            "ORION_GCLOUD_ENDPOINT",
+            "GCLOUD_ENDPOINT",
+            "ENDPOINT",
+        ),
+    )
+
     local_base_url: str = "http://localhost:11434/v1"
     local_model: str = "qwen2.5:7b-instruct"
     local_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("ORION_LOCAL_API_KEY", "LOCAL_API_KEY"),
     )
-    local_timeout: float = 120.0
+    local_timeout: float = 600.0
 
     # Models --------------------------------------------------------------
     model: str = "gemini-3.5-flash"
+
+    # Per-role model allocation. Each agent may override the global model.
+    # Legacy planner/coder/reviewer fields remain supported as fallbacks.
+    architect_model: str | None = None
     planner_model: str | None = None
+    generator_model: str | None = None
     coder_model: str | None = None
+    evaluator_model: str | None = None
     reviewer_model: str | None = None
-    embedding_model: str = "gemini-embedding-001"
+    debugging_model: str | None = None
+    summarizer_model: str | None = None
+    embedding_model: str = "text-embedding-005"
     temperature: float = 0.2
     max_output_tokens: int = 8192
 
@@ -286,6 +340,20 @@ class OrionConfig(BaseSettings):
         return self.llm_provider == "local"
 
     @property
+    def is_gcloud(self) -> bool:
+        return self.llm_provider == "gcloud"
+
+    @property
+    def active_model(self) -> str:
+        """Model actually sent to the configured provider.
+
+        ``ORION_MODEL`` keeps its Gemini default for backwards compatibility,
+        so local mode substitutes ``ORION_LOCAL_MODEL`` unless the user supplied
+        an explicit non-Gemini override (for example via ``--model``).
+        """
+        return self._effective_model(self.model)
+
+    @property
     def local_api_key_value(self) -> str | None:
         if self.local_api_key is None:
             return None
@@ -294,8 +362,8 @@ class OrionConfig(BaseSettings):
 
     @property
     def has_credentials(self) -> bool:
-        """Local models need no key; Gemini does."""
-        return self.is_local or self.has_api_key
+        """Local and gcloud modes need no API key; Gemini does."""
+        return self.is_local or self.is_gcloud or self.has_api_key
 
     @property
     def masked_key(self) -> str:
@@ -345,14 +413,53 @@ class OrionConfig(BaseSettings):
     def manifest_path(self) -> Path:
         return self.data_path / "index_manifest.json"
 
+    @staticmethod
+    def _is_gemini_model_name(name: str) -> bool:
+        candidate = name.strip().lower()
+        if candidate.startswith("models/"):
+            candidate = candidate.split("/", 1)[1]
+        return candidate.startswith("gemini-") or candidate in GEMINI_MODEL_ALIASES
+
+    def _effective_model(self, name: str | None) -> str:
+        candidate = (name or "").strip()
+        if not candidate:
+            return self.local_model if self.is_local else self.model
+        if self.is_local and self._is_gemini_model_name(candidate):
+            return self.local_model
+        return candidate
+
     def model_for(self, agent: str) -> str:
-        """Model override for a specific agent, falling back to the global model."""
-        mapping = {
-            "planner": self.planner_model,
-            "coder": self.coder_model,
-            "reviewer": self.reviewer_model,
+        """Effective model for an agent role, falling back to the global model.
+
+        New role names (``architect``, ``generator``, ``evaluator``, ``debugger``,
+        ``summarizer``) are preferred by the agent graph. The older
+        ``planner``/``coder``/``reviewer`` names remain as aliases so existing
+        configuration keeps working.
+        """
+        role_candidates: dict[str, tuple[str | None, ...]] = {
+            "architect": (self.architect_model, self.planner_model),
+            "planner": (self.planner_model, self.architect_model),
+            "generator": (self.generator_model, self.coder_model),
+            "coder": (self.coder_model, self.generator_model),
+            "evaluator": (self.evaluator_model, self.planner_model),
+            "reviewer": (self.reviewer_model,),
+            "debugger": (
+                self.debugging_model,
+                self.generator_model,
+                self.reviewer_model,
+            ),
+            "debug": (
+                self.debugging_model,
+                self.generator_model,
+                self.reviewer_model,
+            ),
+            "summarizer": (self.summarizer_model,),
+            "summary": (self.summarizer_model,),
         }
-        return mapping.get(agent) or self.model
+        for candidate in role_candidates.get(agent, ()):
+            if candidate:
+                return self._effective_model(candidate)
+        return self.active_model
 
     def ensure_dirs(self) -> None:
         for path in (self.data_path, self.session_path, self.chroma_path):
@@ -363,12 +470,27 @@ class OrionConfig(BaseSettings):
         data: dict[str, Any] = {
             "llm_provider": self.llm_provider,
             "model": self.model,
+            "active_model": self.active_model,
+            "gcloud_project": self.gcloud_project,
+            "gcloud_region": self.gcloud_region,
+            "gcloud_endpoint": self.gcloud_endpoint,
             "local_base_url": self.local_base_url,
             "local_model": self.local_model,
             "has_credentials": self.has_credentials,
             "planner_model": self.model_for("planner"),
             "coder_model": self.model_for("coder"),
             "reviewer_model": self.model_for("reviewer"),
+            "agent_models": {
+                name: self.model_for(name)
+                for name in (
+                    "architect",
+                    "generator",
+                    "evaluator",
+                    "reviewer",
+                    "debugger",
+                    "summarizer",
+                )
+            },
             "embedding_model": self.embedding_model,
             "mode": self.mode,
             "approval": self.approval,
@@ -396,14 +518,17 @@ class OrionConfig(BaseSettings):
             raise ConfigError(
                 "GEMINI_API_KEY is not set. Add it to .env or export it:\n"
                 "  GEMINI_API_KEY=your-key   # https://aistudio.google.com/apikey\n"
-                "Or run fully offline with ORION_LLM_PROVIDER=local and Ollama."
+                "Or use gcloud ADC with ORION_LLM_PROVIDER=gcloud (no API key)."
             )
         return key
 
     def require_credentials(self) -> str:
         """Return the identifier for the active provider, or raise a clear error."""
         if self.is_local:
-            return self.local_model
+            return self.active_model
+        if self.is_gcloud:
+            # ADC may supply the project when ORION_GCLOUD_PROJECT is unset.
+            return self.gcloud_project or "gcloud ADC"
         return self.require_api_key()
 
     def env_hint(self) -> str:

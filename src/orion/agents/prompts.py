@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from orion.config import Mode
@@ -104,6 +105,38 @@ note that no edits were required.
 """
 
 
+SUMMARIZER_SYSTEM = """You are the CONTEXT SUMMARIZER in Orion, a multi-agent coding assistant.
+Compress the repository overview and retrieved context into a compact briefing for
+the architect and builder.
+
+Rules:
+- Keep only facts useful for the current task: relevant files, symbols, patterns,
+  conventions, and test commands.
+- Use short bullet points. Stay under 1000 words.
+- Never invent file paths or APIs. Do not modify files.
+"""
+
+
+EVALUATOR_SYSTEM = """You are the CODE EVALUATOR in Orion, a multi-agent coding assistant.
+Judge whether the builder's changes actually satisfy the task. Deterministic
+verification signals (tests, lint, type checks) are provided separately and take
+precedence over your opinion: if any of them failed, say so.
+
+Return ONLY JSON:
+{
+  "verdict": "approve" | "needs_changes",
+  "summary": "one or two sentences",
+  "issues": ["specific, actionable problem"],
+  "evidence": ["which verification signal supports the verdict"]
+}
+
+Rules:
+- Treat failed tests, lint, or type checks as blocking issues.
+- Do not claim verification you cannot see in the supplied signals.
+- Use "needs_changes" only for real defects; otherwise approve.
+"""
+
+
 DEBUGGER_SYSTEM = """You are the DEBUGGER in Orion, a multi-agent coding assistant.
 A reviewer found problems in the builder's changes. Produce precise repair
 instructions for the builder.
@@ -183,6 +216,51 @@ def reviewer_user_prompt(task: str, plan_text: str, diff: str, test_output: str 
     if test_output:
         sections.extend(["# Test output", test_output])
     sections.append("Return the JSON review now.")
+    return "\n\n".join(sections)
+
+
+def summarizer_user_prompt(task: str, overview: str, context: str) -> str:
+    return f"""# Task
+{task}
+
+# Repository overview
+{overview or "(none)"}
+
+# Retrieved context
+{context or "(none)"}
+
+Write the compact briefing now.
+"""
+
+
+def evaluator_user_prompt(
+    task: str,
+    plan_text: str,
+    diff: str,
+    review: dict[str, Any] | None,
+    signals: list[dict[str, Any]],
+) -> str:
+    signal_lines = []
+    for signal in signals:
+        signal_lines.append(
+            f"- {signal['name']} ({signal.get('framework') or 'check'}): "
+            f"{signal['status']} | command: `{signal.get('command')}`\n"
+            f"  {signal.get('detail', '')}"
+        )
+    review_text = json.dumps(review or {}, ensure_ascii=False, indent=2)
+    sections = [
+        "# Task",
+        task,
+        "# Plan",
+        plan_text or "(no plan)",
+        "# Diff",
+        diff or "(no files changed)",
+        "# Independent review",
+        review_text,
+        "# Deterministic verification signals",
+        "\n".join(signal_lines) or "(no checks available)",
+        "Return the JSON evaluation now.",
+    ]
     return "\n\n".join(sections)
 
 
@@ -277,14 +355,17 @@ def normalize_plan(value: Any) -> dict[str, Any]:
 __all__ = [
     "CODER_SYSTEM",
     "DEBUGGER_SYSTEM",
+    "EVALUATOR_SYSTEM",
     "PLANNER_BUILD_SYSTEM",
     "PLANNER_PLAN_SYSTEM",
     "REVIEWER_SYSTEM",
     "coder_user_prompt",
     "common_rules",
     "debugger_user_prompt",
+    "evaluator_user_prompt",
     "normalize_plan",
     "planner_user_prompt",
     "render_plan",
     "reviewer_user_prompt",
+    "summarizer_user_prompt",
 ]

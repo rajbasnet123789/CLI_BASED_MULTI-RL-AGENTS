@@ -10,16 +10,17 @@ from orion.agents.nodes import (
     coder_node,
     context_node,
     debugger_node,
+    evaluator_node,
     finalizer_node,
     planner_node,
     reviewer_node,
-    tester_node,
+    summarizer_node,
 )
 from orion.agents.state import AgentState
 
 
 def build_graph(runtime: AgentRuntime):
-    """Compile the planner -> builder -> reviewer -> tester state machine."""
+    """Compile the architect -> generator -> reviewer -> evaluator state machine."""
     try:
         from langgraph.graph import END, START, StateGraph
     except ImportError as exc:  # pragma: no cover - dependency is required
@@ -29,38 +30,43 @@ def build_graph(runtime: AgentRuntime):
 
     graph = StateGraph(AgentState)
     graph.add_node("context", partial(context_node, runtime))
+    graph.add_node("summarizer", partial(summarizer_node, runtime))
     graph.add_node("planner", partial(planner_node, runtime))
     graph.add_node("coder", partial(coder_node, runtime))
     graph.add_node("reviewer", partial(reviewer_node, runtime))
+    graph.add_node("evaluator", partial(evaluator_node, runtime))
     graph.add_node("debugger", partial(debugger_node, runtime))
-    graph.add_node("tester", partial(tester_node, runtime))
     graph.add_node("finalize", partial(finalizer_node, runtime))
 
     def after_plan(state: AgentState) -> str:
         return "finalize" if state.get("mode") == "plan" else "coder"
 
-    def after_review(state: AgentState) -> str:
-        review: dict[str, Any] = state.get("review") or {}
+    def after_evaluation(state: AgentState) -> str:
+        evaluation: dict[str, Any] = state.get("evaluation") or {}
         iterations = int(state.get("iterations", 0) or 0)
-        if review.get("verdict") == "needs_changes" and iterations < runtime.config.max_iterations:
+        if (
+            evaluation.get("verdict") == "needs_changes"
+            and iterations < runtime.config.max_iterations
+        ):
             return "debugger"
-        return "tester"
+        return "finalize"
 
     graph.add_edge(START, "context")
-    graph.add_edge("context", "planner")
+    graph.add_edge("context", "summarizer")
+    graph.add_edge("summarizer", "planner")
     graph.add_conditional_edges(
         "planner",
         after_plan,
         {"finalize": "finalize", "coder": "coder"},
     )
     graph.add_edge("coder", "reviewer")
+    graph.add_edge("reviewer", "evaluator")
     graph.add_conditional_edges(
-        "reviewer",
-        after_review,
-        {"debugger": "debugger", "tester": "tester"},
+        "evaluator",
+        after_evaluation,
+        {"debugger": "debugger", "finalize": "finalize"},
     )
     graph.add_edge("debugger", "coder")
-    graph.add_edge("tester", "finalize")
     graph.add_edge("finalize", END)
 
     return graph.compile()
@@ -70,14 +76,15 @@ def graph_mermaid() -> str:
     """Return a Mermaid diagram of the agent graph (used in the docs)."""
     return """flowchart TD
     START([start]) --> context[context / RAG]
-    context --> planner[planner]
-    planner -->|plan mode| finalize[finalize]
-    planner -->|build mode| coder[coder + tools]
-    coder --> reviewer[reviewer]
-    reviewer -->|needs changes| debugger[debugger]
-    debugger --> coder
-    reviewer -->|approved| tester[tester]
-    tester --> finalize
+    context --> summarizer[context summarizer]
+    summarizer --> architect[principal architect / planner]
+    architect -->|plan mode| finalize[finalize]
+    architect -->|build mode| generator[code generator + tools]
+    generator --> reviewer[code reviewer]
+    reviewer --> evaluator[code evaluator + real checks]
+    evaluator -->|needs changes| debugger[debugging agent]
+    debugger --> generator
+    evaluator -->|approved| finalize
     finalize --> END([end])"""
 
 

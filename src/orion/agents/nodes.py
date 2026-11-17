@@ -10,16 +10,20 @@ from typing import Any
 from orion.agents.prompts import (
     CODER_SYSTEM,
     DEBUGGER_SYSTEM,
+    EVALUATOR_SYSTEM,
     PLANNER_BUILD_SYSTEM,
     PLANNER_PLAN_SYSTEM,
     REVIEWER_SYSTEM,
+    SUMMARIZER_SYSTEM,
     coder_user_prompt,
     common_rules,
     debugger_user_prompt,
+    evaluator_user_prompt,
     normalize_plan,
     planner_user_prompt,
     render_plan,
     reviewer_user_prompt,
+    summarizer_user_prompt,
 )
 from orion.agents.state import AgentState
 from orion.approval import ApprovalCallback
@@ -30,7 +34,11 @@ from orion.rag.retriever import CodeRetriever
 from orion.tools.base import FileChange, ToolContext
 from orion.tools.registry import ToolRegistry, changes_diff
 from orion.utils import extract_json, truncate
-from orion.workspace import detect_test_command, project_overview
+from orion.workspace import (
+    VerificationCommand,
+    detect_verification_commands,
+    project_overview,
+)
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -274,13 +282,36 @@ def context_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
     }
 
 
+def summarizer_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
+    """Compress repository context into a briefing for the architect/builder."""
+    runtime.check_cancel()
+    overview = state.get("repo_overview", "") or ""
+    context = state.get("context_text", "") or ""
+    task = state.get("task", "")
+    if not overview and not context:
+        return {"context_summary": ""}
+
+    runtime.status("summarizer", "Summarizing repository context")
+    response = runtime.ask(
+        "summarizer",
+        [{"role": "user", "text": summarizer_user_prompt(task, overview, context)}],
+        system=SUMMARIZER_SYSTEM,
+        model=runtime.config.model_for("summarizer"),
+    )
+    summary = truncate((response.text or "").strip(), 4000, "context summary")
+    if not summary:
+        summary = truncate(f"{overview}\n\n{context}".strip(), 4000, "context summary")
+    runtime.event("summary", agent="summarizer", text=summary)
+    return {"context_summary": summary}
+
+
 def planner_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
     runtime.check_cancel()
     mode: Mode = state.get("mode", runtime.config.mode)  # type: ignore[assignment]
     prompt = planner_user_prompt(
         state.get("task", ""),
         state.get("repo_overview", ""),
-        state.get("context_text", ""),
+        state.get("context_summary") or state.get("context_text", ""),
         mode,
     )
     system = f"{PLANNER_PLAN_SYSTEM}\n{common_rules(mode)}"
@@ -331,7 +362,7 @@ def coder_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
         state.get("task", ""),
         state.get("plan_text", ""),
         state.get("repo_overview", ""),
-        state.get("context_text", ""),
+        state.get("context_summary") or state.get("context_text", ""),
         state.get("fix_notes", ""),
         _change_summary(runtime.changes),
     )
@@ -421,6 +452,149 @@ def reviewer_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
     return {"review": review, "issues": issues}
 
 
+def _run_check(runtime: AgentRuntime, check: VerificationCommand) -> dict[str, Any]:
+    """Run one deterministic check through the approved tool layer."""
+    context = runtime.make_context("build")
+    tool_name = "run_tests" if check.name == "tests" else "run_command"
+    result = runtime.registry.execute(tool_name, {"command": check.command}, context)
+    content = (result.content or "").lower()
+    denied = not result.ok and ("denied" in content or "not available in plan mode" in content)
+    status = "skipped" if denied else ("passed" if result.ok else "failed")
+    data = result.data or {}
+    return {
+        "name": check.name,
+        "framework": check.framework,
+        "command": check.command,
+        "status": status,
+        "exit_code": data.get("exit_code"),
+        "detail": truncate(result.content, 3000, f"{check.name} output"),
+    }
+
+
+def evaluator_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
+    """Combine real test/lint/type signals with an independent model verdict.
+
+    Deterministic failures are blocking: the evaluator never approves a change
+    set that failed tests, lint, or type checking, regardless of model opinion.
+    """
+    runtime.check_cancel()
+
+    signals: list[dict[str, Any]] = []
+    if runtime.changes:
+        runtime.status("evaluator", "Running deterministic verification")
+        for check in detect_verification_commands(runtime.config.workspace):
+            runtime.check_cancel()
+            signal = _run_check(runtime, check)
+            signals.append(signal)
+            runtime.event(
+                "verification",
+                agent="evaluator",
+                name=signal["name"],
+                status=signal["status"],
+                command=signal["command"],
+            )
+
+    test_signal = next((signal for signal in signals if signal["name"] == "tests"), None)
+    test_results: dict[str, Any] = (
+        {
+            "status": test_signal["status"],
+            "command": test_signal["command"],
+            "framework": test_signal["framework"],
+            "exit_code": test_signal["exit_code"],
+            "output": test_signal["detail"],
+            "reason": "Approval denied." if test_signal["status"] == "skipped" else None,
+        }
+        if test_signal
+        else {
+            "status": "skipped",
+            "reason": "No changes to verify." if not runtime.changes else "No test command detected.",
+            "command": None,
+            "framework": None,
+            "exit_code": None,
+        }
+    )
+    runtime.event("test", **test_results)
+
+    failures = [
+        f"{signal['name']} failed ({signal['command']}): {signal['detail'][:400]}"
+        for signal in signals
+        if signal["status"] == "failed"
+    ]
+
+    if not runtime.changes and not failures:
+        evaluation = {
+            "verdict": "approve",
+            "summary": "No files were changed; there is nothing to evaluate.",
+            "issues": [],
+            "signals": signals,
+            "failures": [],
+        }
+        runtime.event("evaluation", agent="evaluator", **evaluation)
+        return {
+            "evaluation": evaluation,
+            "test_results": test_results,
+            "issues": [],
+        }
+
+    diff = changes_diff(runtime.changes)
+    prompt = evaluator_user_prompt(
+        state.get("task", ""),
+        state.get("plan_text", ""),
+        diff,
+        state.get("review") or {},
+        signals,
+    )
+    try:
+        response = runtime.ask(
+            "evaluator",
+            [{"role": "user", "text": prompt}],
+            system=f"{EVALUATOR_SYSTEM}\n{common_rules('build')}",
+            json_mode=True,
+            model=runtime.config.model_for("evaluator"),
+        )
+        parsed = extract_json(response.text) or {}
+    except LLMError:
+        parsed = {}
+
+    verdict = str(parsed.get("verdict", "")).lower().strip()
+    if verdict not in {"approve", "needs_changes"}:
+        verdict = "approve" if not failures else "needs_changes"
+    issues = parsed.get("issues") or []
+    if isinstance(issues, str):
+        issues = [issues]
+    issues = [str(issue) for issue in issues]
+    evidence = parsed.get("evidence") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+
+    if failures:
+        verdict = "needs_changes"
+        issues = failures + issues
+        evidence = [f"deterministic signal: {item}" for item in failures] + [
+            str(item) for item in evidence
+        ]
+
+    evaluation = {
+        "verdict": verdict,
+        "summary": str(parsed.get("summary") or ("Real checks failed." if failures else "Change set evaluated.")),
+        "issues": issues,
+        "evidence": [str(item) for item in evidence],
+        "signals": signals,
+        "failures": failures,
+    }
+    runtime.event("evaluation", agent="evaluator", **evaluation)
+    return {
+        "evaluation": evaluation,
+        "test_results": test_results,
+        "issues": issues,
+    }
+
+
+def tester_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
+    """Backwards-compatible alias for the evaluator node."""
+    return evaluator_node(runtime, state)
+
+
 def debugger_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
     runtime.check_cancel()
     issues = state.get("issues") or []
@@ -433,7 +607,7 @@ def debugger_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
         "debugger",
         [{"role": "user", "text": prompt}],
         system=f"{DEBUGGER_SYSTEM}\n{common_rules('build')}",
-        model=runtime.config.model_for("reviewer"),
+        model=runtime.config.model_for("debugger"),
     )
     notes = response.text or "\n".join(f"- {issue}" for issue in issues)
     runtime.event("message", agent="debugger", text=notes)
@@ -441,37 +615,6 @@ def debugger_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
         "fix_notes": notes,
         "iterations": int(state.get("iterations", 0) or 0) + 1,
     }
-
-
-def tester_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
-    runtime.check_cancel()
-    command, framework = detect_test_command(runtime.config.workspace)
-    if not command:
-        result = {
-            "status": "skipped",
-            "reason": "No test command detected in the project.",
-            "command": None,
-            "framework": None,
-            "exit_code": None,
-        }
-        runtime.event("test", **result)
-        return {"test_results": result}
-
-    runtime.status("tester", f"Running tests: {command}")
-    context = runtime.make_context("build")
-    tool_result = runtime.registry.execute("run_tests", {"command": command}, context)
-    denied = not tool_result.ok and "denied" in tool_result.content.lower()
-    data = tool_result.data or {}
-    result = {
-        "status": "skipped" if denied else ("passed" if tool_result.ok else "failed"),
-        "command": command,
-        "framework": framework,
-        "exit_code": data.get("exit_code"),
-        "output": truncate(tool_result.content, 8000, "test output"),
-        "reason": "Approval denied." if denied else None,
-    }
-    runtime.event("test", **result)
-    return {"test_results": result}
 
 
 def finalizer_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
@@ -524,6 +667,24 @@ def finalizer_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
         for issue in review.get("issues") or []:
             lines.append(f"- {issue}")
 
+    evaluation = state.get("evaluation") or {}
+    if evaluation:
+        lines.extend(
+            [
+                "",
+                "### Evaluation",
+                f"- Verdict: **{str(evaluation.get('verdict', 'unknown')).replace('_', ' ').title()}**",
+                f"- {evaluation.get('summary', '')}",
+            ]
+        )
+        for signal in evaluation.get("signals") or []:
+            lines.append(
+                f"- {signal.get('name')}: {signal.get('status')} "
+                f"(`{signal.get('command')}`)"
+            )
+        for issue in evaluation.get("issues") or []:
+            lines.append(f"- {issue}")
+
     tests = state.get("test_results") or {}
     if tests:
         lines.extend(
@@ -570,8 +731,10 @@ __all__ = [
     "coder_node",
     "context_node",
     "debugger_node",
+    "evaluator_node",
     "finalizer_node",
     "planner_node",
     "reviewer_node",
+    "summarizer_node",
     "tester_node",
 ]

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HackVerse 2026 — College Hackathon</title>
+    <meta
+      name="description"
+      content="HackVerse 2026: a two-day college hackathon for builders, designers, and dreamers."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <canvas id="scene" aria-hidden="true"></canvas>
+    <div class="glow glow-one" aria-hidden="true"></div>
+    <div class="glow glow-two" aria-hidden="true"></div>
+
+    <header class="nav">
+      <a class="brand" href="#top">
+        <span class="brand-mark">◈</span>
+        <span>HACK<span class="brand-accent">VERSE</span></span>
+      </a>
+      <nav class="nav-links">
+        <a href="#about">About</a>
+        <a href="#tracks">Tracks</a>
+        <a href="#schedule">Schedule</a>
+        <a href="#register" class="nav-cta">Register</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">NOVEMBER 21–22 · CAMPUS INNOVATION HALL</p>
+          <h1>
+            Build something<br />
+            <span class="gradient-text">worth shipping.</span>
+          </h1>
+          <p class="lede">
+            48 hours. 4 tracks. 500+ students. One shot to turn a late-night idea
+            into a working product. Beginners welcome — teams form on day one.
+          </p>
+          <div class="hero-actions">
+            <a href="#register" class="btn btn-primary">Register your team →</a>
+            <a href="#tracks" class="btn btn-ghost">Explore tracks</a>
+          </div>
+          <div class="stats" id="stats">
+            <div class="stat"><strong data-stat="teams">—</strong><span>teams</span></div>
+            <div class="stat"><strong data-stat="tracks">—</strong><span>tracks</span></div>
+            <div class="stat"><strong data-stat="members">—</strong><span>builders</span></div>
+          </div>
+        </div>
+        <div class="hero-orbit" aria-hidden="true">
+          <span class="orbit-ring ring-one"></span>
+          <span class="orbit-ring ring-two"></span>
+          <span class="orbit-core">HV</span>
+        </div>
+      </section>
+
+      <section class="section" id="about">
+        <div class="section-head">
+          <p class="eyebrow">// THE EVENT</p>
+          <h2>Two days, zero excuses.</h2>
+          <p class="muted">
+            Bring a laptop and an idea. We provide the mentors, the API credits,
+            the food, and a stage for your demo. Everything else is up to you.
+          </p>
+        </div>
+        <div class="card-grid three">
+          <article class="card">
+            <span class="card-icon">⚡</span>
+            <h3>Ship fast</h3>
+            <p>Real constraints, real users, real demos. No slideware allowed.</p>
+          </article>
+          <article class="card">
+            <span class="card-icon">🧠</span>
+            <h3>Learn from mentors</h3>
+            <p>Engineers from industry rotate through the floor all weekend.</p>
+          </article>
+          <article class="card">
+            <span class="card-icon">🏆</span>
+            <h3>Win big</h3>
+            <p>₹50,000 in prizes plus internships and cloud credits.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="tracks">
+        <div class="section-head">
+          <p class="eyebrow">// TRACKS</p>
+          <h2>Pick your battlefield.</h2>
+          <p class="muted">Four tracks, each with its own judges and prize pool.</p>
+        </div>
+        <div class="card-grid four" id="track-list">
+          <p class="muted">Loading tracks…</p>
+        </div>
+      </section>
+
+      <section class="section" id="schedule">
+        <div class="section-head">
+          <p class="eyebrow">// SCHEDULE</p>
+          <h2>The run of show.</h2>
+        </div>
+        <div class="timeline" id="schedule-list">
+          <p class="muted">Loading schedule…</p>
+        </div>
+      </section>
+
+      <section class="section" id="register">
+        <div class="register-panel">
+          <div>
+            <p class="eyebrow">// REGISTRATION</p>
+            <h2>Ready when you are.</h2>
+            <p class="muted">
+              Register a team of 1–6. Solo builders are welcome — we'll match you
+              with a team at the opening ceremony.
+            </p>
+          </div>
+          <form id="register-form" novalidate>
+            <label>
+              Team name
+              <input name="name" type="text" placeholder="e.g. Null Pointers" required />
+            </label>
+            <label>
+              Track
+              <select name="track" id="track-select" required>
+                <option value="">Choose a track…</option>
+              </select>
+            </label>
+            <label>
+              Team size
+              <input name="members" type="number" min="1" max="6" value="3" required />
+            </label>
+            <button type="submit" class="btn btn-primary">Register team →</button>
+            <p class="form-status" id="form-status" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>◈ HACKVERSE 2026</span>
+      <span>Built for the campus, by the campus.</span>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

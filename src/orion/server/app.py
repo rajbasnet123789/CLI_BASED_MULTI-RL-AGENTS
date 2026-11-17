@@ -53,7 +53,8 @@ def create_app(config: OrionConfig | None = None) -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
-            "model": config.model,
+            "provider": config.llm_provider,
+            "model": config.active_model,
             "workspace": str(config.workspace),
             "api_key": config.has_api_key,
         }

@@ -6,9 +6,12 @@ import io
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from orion.config import OrionConfig
 from orion.llm import (
     FunctionCall,
+    GCloudLLM,
     GeminiLLM,
     LLMResponse,
     LocalLLM,
@@ -222,12 +225,91 @@ def _local_config(config: OrionConfig) -> OrionConfig:
 
 
 def test_build_llm_selects_provider(config: OrionConfig) -> None:
-    assert isinstance(build_llm(config), GeminiLLM)
+    assert isinstance(build_llm(config), GCloudLLM)
+    gemini = build_llm(config.with_overrides(llm_provider="gemini", gemini_api_key="AIzaTest"))
+    assert isinstance(gemini, GeminiLLM)
     local = build_llm(_local_config(config))
     assert isinstance(local, LocalLLM)
     assert local.model == "qwen2.5:7b-instruct"
     assert local.active_backend == "ollama"
     assert local.mode_switched is False
+
+
+def test_build_llm_selects_gcloud(config: OrionConfig) -> None:
+    gcloud = build_llm(config.with_overrides(llm_provider="gcloud", gcloud_project="p"))
+    assert isinstance(gcloud, GCloudLLM)
+    assert gcloud.model == "gemini-3.5-flash"
+
+
+def test_gcloud_model_fallback_chain(config: OrionConfig) -> None:
+    llm = GCloudLLM(config.with_overrides(llm_provider="gcloud"))
+    assert llm._model_candidates("claude-opus-5-5") == [
+        "claude-opus-5-5",
+        "gemini-3.1-pro-preview",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
+    ]
+    assert llm._model_candidates("glm-5-maas")[:2] == ["glm-5-maas", "gemini-3.5-flash"]
+    assert llm._model_unavailable(llm._wrap_error(RuntimeError("404 NOT_FOUND")))
+    assert not llm._model_unavailable(llm._wrap_error(RuntimeError("429 rate limit")))
+
+
+def test_gcloud_backend_metadata_and_errors(config: OrionConfig) -> None:
+    gcloud_config = config.with_overrides(
+        llm_provider="gcloud",
+        gcloud_project="project-6a0ab983-d480-4954-99f",
+        gcloud_region="us-east5",
+        gcloud_endpoint="us-east5-aiplatform.googleapis.com",
+    )
+    llm = GCloudLLM(gcloud_config)
+    assert llm.active_backend == "gcloud-vertex (us-east5)"
+    assert llm.mode_switched is False
+    assert llm.base_url == "https://us-east5-aiplatform.googleapis.com/"
+
+    wrapped = llm._wrap_error(RuntimeError("default credentials were not found"))
+    assert "gcloud auth application-default login" in str(wrapped)
+    forbidden = llm._wrap_error(RuntimeError("403 permission denied"))
+    assert "roles/aiplatform.user" in str(forbidden)
+
+
+def test_gcloud_client_uses_adc_and_regional_endpoint(
+    config: OrionConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import google.auth
+    import google.genai
+
+    calls: dict[str, object] = {}
+
+    class FakeCredentials:
+        pass
+
+    def fake_default(*, scopes: object = None) -> tuple[object, str]:
+        calls["scopes"] = scopes
+        return FakeCredentials(), "adc-project"
+
+    def fake_client(**kwargs: object) -> object:
+        calls["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(google.auth, "default", fake_default)
+    monkeypatch.setattr(google.genai, "Client", fake_client)
+
+    gcloud_config = config.with_overrides(
+        llm_provider="gcloud",
+        gcloud_project="project-6a0ab983-d480-4954-99f",
+        gcloud_region="us-east5",
+        gcloud_endpoint="us-east5-aiplatform.googleapis.com",
+    )
+    llm = GCloudLLM(gcloud_config)
+    assert llm.client is not None
+    kwargs = calls["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["vertexai"] is True
+    assert kwargs["project"] == "project-6a0ab983-d480-4954-99f"
+    assert kwargs["location"] == "us-east5"
+    assert isinstance(kwargs["credentials"], FakeCredentials)
+    assert kwargs["http_options"] == {"base_url": "https://us-east5-aiplatform.googleapis.com/"}
 
 
 def test_local_message_conversion(config: OrionConfig) -> None:
@@ -336,8 +418,8 @@ def test_local_error_hints(config: OrionConfig) -> None:
     offline = llm._wrap_error(
         RuntimeError("Connection refused"), model=llm.model, base_url=llm.base_url
     )
-    assert "Ollama" in str(offline)
+    assert "local model server" in str(offline)
     missing = llm._wrap_error(
         RuntimeError("404 model not found"), model=llm.model, base_url=llm.base_url
     )
-    assert "ollama pull" in str(missing)
+    assert "not found by the local server" in str(missing)

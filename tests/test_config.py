@@ -74,16 +74,128 @@ def test_local_provider_needs_no_api_key(workspace: Path) -> None:
     assert config.is_local is True
     assert config.has_api_key is False
     assert config.has_credentials is True
+    assert config.active_model == config.local_model
+    assert config.model_for("planner") == config.local_model
     assert config.require_credentials() == config.local_model
     described = config.describe()
     assert described["llm_provider"] == "local"
+    assert described["model"] == "gemini-3.5-flash"
+    assert described["active_model"] == config.local_model
     assert described["local_model"] == config.local_model
     assert described["has_credentials"] is True
 
-    gemini = OrionConfig(_env_file=None, workspace=workspace, gemini_api_key=None)
+    gemini = OrionConfig(
+        _env_file=None, workspace=workspace, llm_provider="gemini", gemini_api_key=None
+    )
+    assert gemini.active_model == gemini.model
+    assert gemini.model_for("planner") == gemini.model
     assert gemini.has_credentials is False
     with pytest.raises(ConfigError):
         gemini.require_credentials()
+
+
+def test_local_active_model_honors_explicit_override(workspace: Path) -> None:
+    config = OrionConfig(
+        _env_file=None,
+        workspace=workspace,
+        llm_provider="local",
+        local_model="qwen2.5:3b-instruct",
+    )
+    aliased = config.with_overrides(model="models/gemini-2.5-pro")
+    assert aliased.active_model == "qwen2.5:3b-instruct"
+    custom = config.with_overrides(model="llama3.2:latest")
+    assert custom.active_model == "llama3.2:latest"
+    planner = config.with_overrides(planner_model="pro")
+    assert planner.model_for("planner") == "qwen2.5:3b-instruct"
+
+
+def test_gcloud_provider_needs_no_api_key(workspace: Path) -> None:
+    config = OrionConfig(
+        _env_file=None,
+        workspace=workspace,
+        llm_provider="gcloud",
+        gcloud_project="project-6a0ab983-d480-4954-99f",
+        gcloud_region="us-east5",
+        gcloud_endpoint="us-east5-aiplatform.googleapis.com",
+        gemini_api_key=None,
+    )
+    assert config.is_gcloud is True
+    assert config.is_local is False
+    assert config.has_api_key is False
+    assert config.has_credentials is True
+    assert config.active_model == "gemini-3.5-flash"
+    assert config.model_for("planner") == "gemini-3.5-flash"
+    assert config.require_credentials() == "project-6a0ab983-d480-4954-99f"
+    described = config.describe()
+    assert described["llm_provider"] == "gcloud"
+    assert described["gcloud_project"] == "project-6a0ab983-d480-4954-99f"
+    assert described["gcloud_region"] == "us-east5"
+    assert described["gcloud_endpoint"] == "us-east5-aiplatform.googleapis.com"
+    assert described["has_credentials"] is True
+
+    without_project = config.with_overrides(gcloud_project="")
+    assert without_project.require_credentials() == "gcloud ADC"
+
+
+def test_gcloud_env_aliases(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "ORION_GCLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+        "GOOGLE_CLOUD_PROJECT",
+        "ORION_GCLOUD_REGION",
+        "GCLOUD_REGION",
+        "GOOGLE_CLOUD_REGION",
+        "ORION_GCLOUD_ENDPOINT",
+        "GCLOUD_ENDPOINT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("PROJECT_ID", "alias-project")
+    monkeypatch.setenv("REGION", "europe-west4")
+    monkeypatch.setenv("ENDPOINT", "europe-west4-aiplatform.googleapis.com")
+    config = OrionConfig(_env_file=None, workspace=workspace)
+    assert config.gcloud_project == "alias-project"
+    assert config.gcloud_region == "europe-west4"
+    assert config.gcloud_endpoint == "europe-west4-aiplatform.googleapis.com"
+
+
+def test_default_provider_is_vertex_adc(workspace: Path) -> None:
+    config = OrionConfig(_env_file=None, workspace=workspace, gemini_api_key=None)
+    assert config.llm_provider == "gcloud"
+    assert config.is_gcloud is True
+    assert config.has_credentials is True
+    assert config.gcloud_region == "global"
+    assert config.gcloud_endpoint == "aiplatform.googleapis.com"
+
+
+def test_role_model_allocation(workspace: Path) -> None:
+    config = OrionConfig(
+        _env_file=None,
+        workspace=workspace,
+        architect_model="claude-opus-5-5",
+        generator_model="glm-5-maas",
+        evaluator_model="claude-opus-5-5",
+        reviewer_model="gemini-3-flash-preview",
+        debugging_model="glm-5-maas",
+        summarizer_model="gemini-flash-lite",
+    )
+    assert config.model_for("architect") == "claude-opus-5-5"
+    assert config.model_for("planner") == "claude-opus-5-5"
+    assert config.model_for("generator") == "glm-5-maas"
+    assert config.model_for("coder") == "glm-5-maas"
+    assert config.model_for("evaluator") == "claude-opus-5-5"
+    assert config.model_for("reviewer") == "gemini-3-flash-preview"
+    assert config.model_for("debugger") == "glm-5-maas"
+    assert config.model_for("summarizer") == "gemini-flash-lite"
+    assert config.describe()["agent_models"]["reviewer"] == "gemini-3-flash-preview"
+
+    legacy = config.with_overrides(
+        architect_model="",
+        planner_model="gemini-2.5-pro",
+        generator_model="",
+        coder_model="gemini-2.5-flash",
+    )
+    assert legacy.model_for("architect") == "gemini-2.5-pro"
+    assert legacy.model_for("generator") == "gemini-2.5-flash"
 
 
 def test_validation_rejects_bad_values(workspace: Path) -> None:

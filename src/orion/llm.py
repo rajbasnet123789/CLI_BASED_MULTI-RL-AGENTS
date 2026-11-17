@@ -1,16 +1,16 @@
 """LLM backends used by the agents and the embedding pipeline.
 
-Two providers are supported:
+Providers:
 
-* ``gemini`` (default) talks to Gemini through the official ``google-genai``
-  SDK. Both Google AI Studio keys (``AIza...``) and Vertex AI express-mode keys
-  (``AQ....``) are supported. In ``auto`` mode the mode is inferred from the key
-  prefix and, if that guess is rejected, Orion retries once with the other
-  backend. Set ``ORION_VERTEX=true``/``false`` to pin a mode.
-* ``local`` talks to any OpenAI-compatible local server (Ollama by default).
+* ``gcloud`` (default) uses Vertex AI with local gcloud Application Default
+  Credentials (no API key) and the global endpoint. Requested third-party role
+  models fall back to available Gemini models when Vertex returns 404.
+* ``gemini`` (legacy compatibility) talks through the official ``google-genai``
+  SDK with a user-supplied key.
+* ``local`` (legacy compatibility) talks to an OpenAI-compatible local server.
   It needs no API key and uses the offline hash embedder for retrieval.
 
-Both backends expose the same small interface: ``generate``, ``stream``,
+All backends expose the same small interface: ``generate``, ``stream``,
 ``embed``, ``ping``, ``usage``, and ``active_backend``.
 """
 
@@ -310,7 +310,12 @@ class GeminiLLM:
             kwargs["tools"] = tool_objects
         if response_mime_type:
             kwargs["response_mime_type"] = response_mime_type
+        kwargs.update(self._extra_generate_config())
         return types.GenerateContentConfig(**{k: v for k, v in kwargs.items() if v is not None})
+
+    def _extra_generate_config(self) -> dict[str, Any]:
+        """Backend-specific additions to ``GenerateContentConfig``."""
+        return {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -337,15 +342,21 @@ class GeminiLLM:
             response_mime_type=response_mime_type,
         )
 
-        def call() -> Any:
+        def call(model: str) -> Any:
             return self.client.models.generate_content(
-                model=model_name, contents=contents, config=config
+                model=model, contents=contents, config=config
             )
 
-        response = self._retry(call, model=model_name)
-        result = self._parse_response(response, model_name)
+        response, used_model = self._invoke_model(call, model_name)
+        result = self._parse_response(response, used_model)
         self.usage.add(result.prompt_tokens, result.output_tokens)
         return result
+
+    def _invoke_model(
+        self, call: Any, model_name: str
+    ) -> tuple[Any, str]:
+        """Run a generation call, allowing backends to substitute a model."""
+        return self._retry(lambda: call(model_name), model=model_name), model_name
 
     def stream(
         self,
@@ -624,6 +635,186 @@ class GeminiLLM:
                 f"Details: {message}"
             )
         return LLMError(f"Gemini request failed: {message}")
+
+
+# Requested role models are kept exactly as configured. If Vertex does not
+# serve one (404 / no access), Orion tries the next entry so a fresh install
+# still works without extra API keys or manual edits.
+GCLOUD_MODEL_FALLBACKS: dict[str, str] = {
+    "claude-opus-5-5": "gemini-3.1-pro-preview",
+    "claude-opus-4-5": "gemini-3.1-pro-preview",
+    "glm-5-maas": "gemini-3.5-flash",
+    "glm-5": "gemini-3.5-flash",
+    "gemini-3.1-pro-preview": "gemini-3.5-flash",
+    "gemini-3-flash-preview": "gemini-3.5-flash",
+    "gemini-3.5-flash": "gemini-3.5-flash-lite",
+    "gemini-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-3.5-flash-lite": "gemini-3-flash-preview",
+}
+
+
+class GCloudLLM(GeminiLLM):
+    """Vertex AI through local gcloud Application Default Credentials.
+
+    Unlike :class:`GeminiLLM` this backend sends no API key. It authenticates
+    with ``gcloud auth application-default login`` (or any other ADC source),
+    then calls the regional Vertex AI endpoint configured by
+    ``ORION_GCLOUD_ENDPOINT``/``ORION_GCLOUD_REGION``.
+    """
+
+    def __init__(
+        self,
+        config: OrionConfig,
+        model: str | None = None,
+        client: Any | None = None,
+    ) -> None:
+        super().__init__(config, model=model, client=client)
+        self.model = normalize_model(model or config.active_model)
+        self._vertex_active = True
+        self.model_fallbacks: dict[str, str] = {}
+        self.last_model: str = self.model
+
+    @property
+    def base_url(self) -> str:
+        endpoint = self.config.gcloud_endpoint.strip().rstrip("/")
+        if not endpoint:
+            return ""
+        if "://" not in endpoint:
+            endpoint = f"https://{endpoint}"
+        return endpoint.rstrip("/") + "/"
+
+    @property
+    def active_backend(self) -> str:
+        suffix = ""
+        if self.model_fallbacks:
+            suffix = f" · fallback {len(self.model_fallbacks)}"
+        return f"gcloud-vertex ({self.config.gcloud_region}){suffix}"
+
+    def _model_candidates(self, model_name: str) -> list[str]:
+        candidates = [model_name]
+        seen = {model_name}
+        current = model_name
+        while current in GCLOUD_MODEL_FALLBACKS:
+            next_model = GCLOUD_MODEL_FALLBACKS[current]
+            if next_model in seen:
+                break
+            candidates.append(next_model)
+            seen.add(next_model)
+            current = next_model
+        return candidates
+
+    @staticmethod
+    def _model_unavailable(exc: LLMError) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in ("404", "not found", "not available", "does not have access")
+        )
+
+    def _invoke_model(self, call: Any, model_name: str) -> tuple[Any, str]:
+        candidates = self._model_candidates(model_name)
+        for index, candidate in enumerate(candidates):
+            try:
+                response = self._retry(lambda c=candidate: call(c), model=candidate)
+                self.last_model = candidate
+                return response, candidate
+            except LLMError as exc:
+                is_last = index == len(candidates) - 1
+                if is_last or not self._model_unavailable(exc):
+                    raise
+                self.model_fallbacks[candidate] = candidates[index + 1]
+        raise LLMError(f"No usable Vertex AI model for '{model_name}'")  # pragma: no cover
+
+    def _extra_generate_config(self) -> dict[str, Any]:
+        # Gemini 3.x spends a large fraction of a small output budget on
+        # thinking, which can leave an empty reply for short prompts. MINIMAL
+        # keeps deterministic prompts (doctor pings, JSON agent output) usable.
+        try:
+            from google.genai import types
+
+            return {
+                "thinking_config": types.ThinkingConfig(
+                    thinking_level=types.ThinkingLevel.MINIMAL
+                )
+            }
+        except (ImportError, AttributeError, TypeError):  # pragma: no cover - SDK variants
+            return {}
+
+    @property
+    def mode_switched(self) -> bool:
+        """Vertex mode is explicit; there is no AI Studio fallback here."""
+        return False
+
+    def _make_client(self) -> Any:
+        try:
+            import google.auth
+            from google import genai
+        except ImportError as exc:  # pragma: no cover - dependency is required
+            raise LLMError(
+                "google-genai/google-auth are not installed. Reinstall Orion: pip install 'orion-ai'"
+            ) from exc
+
+        try:
+            credentials, detected_project = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+        except Exception as exc:
+            raise LLMError(
+                "No gcloud Application Default Credentials found. Run:\n"
+                "  gcloud auth application-default login\n"
+                "then retry. Project: "
+                f"{self.config.gcloud_project or '(detected from ADC)'}"
+            ) from exc
+
+        project = self.config.gcloud_project or detected_project
+        if not project:
+            raise LLMError(
+                "No Google Cloud project is configured. Set ORION_GCLOUD_PROJECT or run:\n"
+                "  gcloud config set project YOUR_PROJECT_ID"
+            )
+
+        kwargs: dict[str, Any] = {
+            "vertexai": True,
+            "project": project,
+            "location": self.config.gcloud_region,
+            "credentials": credentials,
+        }
+        if self.base_url:
+            kwargs["http_options"] = {"base_url": self.base_url}
+        try:
+            return genai.Client(**kwargs)
+        except Exception as exc:
+            raise LLMError(
+                "Could not create the gcloud Vertex AI client. Check the project, "
+                f"region ({self.config.gcloud_region}), and endpoint "
+                f"({self.config.gcloud_endpoint}). Details: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _wrap_error(exc: Exception, model: str | None = None) -> LLMError:
+        message = str(exc)
+        lowered = message.lower()
+        if any(
+            marker in lowered
+            for marker in ("default credentials", "could not automatically determine", "adc")
+        ):
+            hint = (
+                "gcloud authentication failed. Run "
+                "`gcloud auth application-default login` and retry."
+            )
+        elif any(marker in lowered for marker in ("permission", "403", "forbidden")):
+            hint = (
+                "Vertex AI access was denied for the configured project. Enable the "
+                "Vertex AI API and grant your account roles/aiplatform.user."
+            )
+        elif "not found" in lowered or "not supported" in lowered:
+            hint = (
+                f"Model '{model or 'unknown'}' is not available in the configured Vertex AI "
+                "region. Try a different ORION_MODEL or ORION_GCLOUD_REGION."
+            )
+        else:
+            hint = "gcloud Vertex AI request failed."
+        return LLMError(f"{hint}\n\nDetails: {message}")
 
 
 def _tool_call_id(call: dict[str, Any], index: int) -> str:
@@ -984,12 +1175,12 @@ class LocalLLM:
         ):
             hint = (
                 f"Cannot reach the local model server at {base_url}. "
-                "Start Ollama first (for example: ollama serve), then retry."
+                "Start your local OpenAI-compatible server, then retry."
             )
         elif "404" in text or "not found" in lowered:
             hint = (
                 f"Model '{model}' was not found by the local server. "
-                f"Pull it with: ollama pull {model}"
+                "Pull the model into your local server and retry."
             )
         elif "400" in text and ("tool" in lowered or "function" in lowered):
             hint = (
@@ -1006,7 +1197,7 @@ def truncate_for_error(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-LLM = GeminiLLM | LocalLLM
+LLM = GeminiLLM | GCloudLLM | LocalLLM
 
 
 def build_llm(config: OrionConfig, *, client: Any | None = None) -> LLM:
@@ -1016,6 +1207,8 @@ def build_llm(config: OrionConfig, *, client: Any | None = None) -> LLM:
     """
     if config.llm_provider == "local":
         return LocalLLM(config, client=client)
+    if config.llm_provider == "gcloud":
+        return GCloudLLM(config, client=client)
     return GeminiLLM(config, client=client)
 
 
@@ -1024,6 +1217,7 @@ __all__ = [
     "LLM",
     "MODEL_ALIASES",
     "FunctionCall",
+    "GCloudLLM",
     "GeminiLLM",
     "LLMResponse",
     "LocalLLM",

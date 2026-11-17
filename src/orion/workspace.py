@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import subprocess
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from orion.config import DEFAULT_IGNORE
@@ -401,6 +403,75 @@ def detect_test_command(root: str | Path) -> tuple[str | None, str | None]:
     return None, None
 
 
+@dataclass(frozen=True)
+class VerificationCommand:
+    """A deterministic check the evaluator can run without an LLM judge."""
+
+    name: str
+    command: str
+    framework: str
+
+
+def detect_verification_commands(root: str | Path) -> list[VerificationCommand]:
+    """Detect test, lint, and type-check commands for the evaluator.
+
+    These are real, repeatable signals. The evaluator combines their exit codes
+    with (not merely) the model's own opinion about the changes.
+    """
+    root_path = Path(root)
+    found: list[VerificationCommand] = []
+    seen: set[str] = set()
+
+    def add(name: str, command: str | None, framework: str) -> None:
+        if not command or command in seen:
+            return
+        seen.add(command)
+        found.append(VerificationCommand(name=name, command=command, framework=framework))
+
+    test_command, test_framework = detect_test_command(root_path)
+    add("tests", test_command, test_framework or "tests")
+
+    config_text = ""
+    for config_name in ("pyproject.toml", "setup.cfg", "tox.ini", ".flake8"):
+        config_path = root_path / config_name
+        if config_path.is_file():
+            try:
+                config_text += "\n" + config_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    lowered = config_text.lower()
+    has_src = (root_path / "src").is_dir()
+    has_tests = (root_path / "tests").is_dir()
+
+    if "ruff" in lowered:
+        target = "src tests" if has_src and has_tests else "."
+        add("lint", f"ruff check {target}", "ruff")
+    elif "flake8" in lowered:
+        add("lint", "python -m flake8 .", "flake8")
+
+    if "mypy" in lowered:
+        target = "src" if has_src else "."
+        add("typecheck", f"python -m mypy {target}", "mypy")
+    elif (root_path / "tsconfig.json").is_file():
+        add("typecheck", "npx tsc --noEmit", "typescript")
+    elif (root_path / "go.mod").is_file():
+        add("typecheck", "go vet ./...", "go")
+    elif (root_path / "Cargo.toml").is_file():
+        add("typecheck", "cargo clippy --all-targets -- -D warnings", "clippy")
+
+    if "lint" not in {command.name for command in found}:
+        package_json = root_path / "package.json"
+        if package_json.is_file():
+            try:
+                scripts = json.loads(package_json.read_text(encoding="utf-8")).get("scripts", {})
+            except (OSError, ValueError, AttributeError):
+                scripts = {}
+            if isinstance(scripts, dict) and scripts.get("lint"):
+                add("lint", "npm run lint", "npm")
+
+    return found
+
+
 def build_tree(relative_paths: Iterable[str], limit: int = 120) -> list[str]:
     """Render a compact directory tree from relative POSIX paths."""
     tree: dict[str, dict] = {}
@@ -515,6 +586,7 @@ __all__ = [
     "build_tree",
     "changed_files",
     "detect_test_command",
+    "detect_verification_commands",
     "git_info",
     "human_size",
     "is_binary",

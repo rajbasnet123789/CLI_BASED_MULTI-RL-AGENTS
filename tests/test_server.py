@@ -18,6 +18,8 @@ def test_health_config_and_status(config: OrionConfig) -> None:
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
+    assert health.json()["provider"] == config.llm_provider
+    assert health.json()["model"] == config.active_model
     assert health.json()["api_key"] is False
 
     described = client.get("/config")

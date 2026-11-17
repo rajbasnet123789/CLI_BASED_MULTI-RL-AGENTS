@@ -11,12 +11,14 @@ class AgentState(TypedDict, total=False):
     repo_overview: str
     context: list[dict[str, Any]]
     context_text: str
+    context_summary: str
     plan: dict[str, Any]
     plan_text: str
     fix_notes: str
     coder_summary: str
     changes: list[dict[str, Any]]
     review: dict[str, Any]
+    evaluation: dict[str, Any]
     issues: list[str]
     test_results: dict[str, Any]
     iterations: int

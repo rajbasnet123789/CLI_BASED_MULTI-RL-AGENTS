@@ -92,7 +92,7 @@ queue, ending with a `done` event. `OrionEngine.run` is the synchronous form.
 2. **Chunk** — split by lines into overlapping windows with a maximum character
    budget; each chunk records `path`, `start_line`, `end_line`, `language`, and
    a content hash.
-3. **Embed** — Gemini embeddings (`gemini-embedding-001`) or the offline
+3. **Embed** — Vertex embeddings (`text-embedding-005`, via ADC) or the offline
    `local-hash-v1` embedder. The embedder name is recorded; switching embedders
    triggers a reset so vectors are never mixed.
 4. **Store** — ChromaDB with cosine distance, or a JSON store when Chroma is

@@ -53,9 +53,9 @@ app = typer.Typer(
     rich_markup_mode="rich",
     no_args_is_help=False,
     help=(
-        "Orion AI - a multi-agent coding assistant powered by Gemini or a local "
-        "Ollama model, LangGraph, and ChromaDB. Run without arguments to open "
-        "the interactive UI."
+        "Orion AI - a multi-agent coding assistant powered by Vertex AI via "
+        "gcloud ADC (no API key needed), LangGraph, and ChromaDB. Run without "
+        "arguments to open the interactive UI."
     ),
 )
 config_app = typer.Typer(help="Show or update Orion configuration.")
@@ -64,21 +64,26 @@ app.add_typer(config_app, name="config")
 app.add_typer(session_app, name="sessions")
 
 console = Console()
-ENV_TEMPLATE = """# Orion AI configuration
-# Gemini provider (default): add a key, or switch to a local model below.
-GEMINI_API_KEY=
-ORION_VERTEX=auto
-ORION_MODEL=gemini-3.5-flash
-ORION_EMBEDDING_MODEL=gemini-embedding-001
+ENV_TEMPLATE = """# Orion AI configuration - Vertex AI via gcloud ADC (no API key)
+ORION_LLM_PROVIDER=gcloud
+ORION_GCLOUD_PROJECT=your-gcp-project-id
+ORION_GCLOUD_REGION=global
+ORION_GCLOUD_ENDPOINT=aiplatform.googleapis.com
 
-# No API key needed: run Ollama locally with Qwen2.5.
-# ORION_LLM_PROVIDER=local
-# ORION_LOCAL_BASE_URL=http://localhost:11434/v1
-# ORION_LOCAL_MODEL=qwen2.5:7b-instruct
+# Role-based models
+ORION_ARCHITECT_MODEL=claude-opus-5-5
+ORION_GENERATOR_MODEL=glm-5-maas
+ORION_EVALUATOR_MODEL=claude-opus-5-5
+ORION_REVIEWER_MODEL=gemini-3-flash-preview
+ORION_DEBUGGING_MODEL=glm-5-maas
+ORION_SUMMARIZER_MODEL=gemini-flash-lite
+
+ORION_MODEL=gemini-3.5-flash
+ORION_EMBEDDINGS=local
+ORION_EMBEDDING_MODEL=text-embedding-005
 
 ORION_MODE=build
 ORION_APPROVAL=ask
-ORION_EMBEDDINGS=auto
 ORION_AUTO_INDEX=true
 """
 ORIONIGNORE_TEMPLATE = """# Directories and files Orion should never index or search
@@ -173,14 +178,12 @@ def _run_prompt(
         console.print(
             Panel(
                 Text(
-                    "No LLM provider is configured.\n\n"
-                    "Option 1 - local model (no API key):\n"
-                    "  ORION_LLM_PROVIDER=local\n"
-                    "  ORION_LOCAL_MODEL=qwen2.5:7b-instruct\n"
-                    "  Start Ollama, then: ollama pull qwen2.5:7b-instruct\n\n"
-                    "Option 2 - Gemini:\n"
-                    f"  Add GEMINI_API_KEY to {config.workspace / '.env'}\n"
-                    "  Create a key at https://aistudio.google.com/apikey"
+                    "Vertex AI credentials are missing.\n\n"
+                    "Set up gcloud Application Default Credentials (no API key):\n"
+                    "  gcloud auth application-default login\n"
+                    "  gcloud config set project YOUR_PROJECT_ID\n\n"
+                    f"Then set ORION_GCLOUD_PROJECT in {config.workspace / '.env'}\n"
+                    "(or run `orion init` to create a starter .env)."
                 ),
                 title="[bold red]missing LLM credentials[/bold red]",
                 border_style="red",
@@ -261,8 +264,8 @@ def cli(
                 Text.assemble(
                     ("◆ ORION AI\n\n", "bold magenta"),
                     (
-                        "Multi-agent coding assistant powered by Gemini or local "
-                        "Ollama + LangGraph.\n\n",
+                        "Multi-agent coding assistant powered by Vertex AI "
+                        "(gcloud ADC, no API key) + LangGraph.\n\n",
                         "",
                     ),
                     ("orion run \"add tests for the parser\"\n", "cyan"),
@@ -453,7 +456,11 @@ def status_cmd(
     for key in (
         "workspace",
         "llm_provider",
+        "active_model",
         "model",
+        "gcloud_project",
+        "gcloud_region",
+        "gcloud_endpoint",
         "local_base_url",
         "local_model",
         "mode",
@@ -506,13 +513,31 @@ def doctor_cmd(
     table.add_row("data dir", str(config.data_path))
     table.add_row("env files", ", ".join(str(path) for path in discover_env_files(config.workspace)) or "(none)")
 
-    table.add_row(
-        "llm provider",
-        "[green]local (Ollama)[/green]" if config.is_local else "gemini",
+    provider_label = (
+        "[green]local[/green]"
+        if config.is_local
+        else "[green]gcloud (Vertex AI)[/green]"
+        if config.is_gcloud
+        else "gemini"
     )
+    table.add_row("llm provider", provider_label)
     if config.is_local:
         table.add_row("local base url", config.local_base_url)
         table.add_row("local model", config.local_model)
+        table.add_row(
+            "GEMINI_API_KEY",
+            "[dim]not needed[/dim]"
+            if not config.has_api_key
+            else f"[dim]set but unused ({config.masked_key})[/dim]",
+        )
+    elif config.is_gcloud:
+        table.add_row(
+            "gcloud project",
+            config.gcloud_project or "[yellow]not set (ADC may supply it)[/yellow]",
+        )
+        table.add_row("gcloud region", config.gcloud_region)
+        table.add_row("gcloud endpoint", config.gcloud_endpoint)
+        table.add_row("active model", config.active_model)
         table.add_row(
             "GEMINI_API_KEY",
             "[dim]not needed[/dim]"
@@ -571,20 +596,17 @@ def doctor_cmd(
         table.add_row("index", f"[yellow]{exc}[/yellow]")
 
     if not skip_ping and config.has_credentials:
-        label = "local ping" if config.is_local else "gemini ping"
+        kind = "local" if config.is_local else "gcloud" if config.is_gcloud else "gemini"
         try:
             from orion.llm import build_llm
 
             llm = build_llm(config)
             reply = llm.ping()
-            table.add_row(label, f"[green]{truncate(reply, 60, 'reply')}[/green]")
+            table.add_row(f"{kind} ping", f"[green]{truncate(reply, 60, 'reply')}[/green]")
             backend = llm.active_backend
             if llm.mode_switched:
                 backend += " · auto-fallback"
-            table.add_row(
-                "local backend" if config.is_local else "gemini backend",
-                backend,
-            )
+            table.add_row(f"{kind} backend", backend)
         except Exception as exc:
             table.add_row(label, f"[red]{truncate(str(exc), 160, 'error')}[/red]")
     console.print(table)
@@ -622,9 +644,9 @@ def init_cmd(
         for path in created:
             console.print(f"  {path}")
     console.print(
-        "\nNext: add GEMINI_API_KEY to [bold].env[/bold], or uncomment the "
-        "[bold]ORION_LLM_PROVIDER=local[/bold] lines to use Ollama with no key. "
-        "Then run [bold]orion doctor[/bold]."
+        "\nNext: run [bold]gcloud auth application-default login[/bold], set "
+        "[bold]ORION_GCLOUD_PROJECT[/bold] in [bold].env[/bold], then run "
+        "[bold]orion doctor[/bold]. No API key is needed."
     )
 
 

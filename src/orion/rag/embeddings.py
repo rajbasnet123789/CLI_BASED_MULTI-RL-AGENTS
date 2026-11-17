@@ -132,7 +132,7 @@ def build_embedder(config: OrionConfig, llm: LLM | None = None) -> Embedder:
     """Pick the configured embedding backend."""
     if config.embeddings == "local" or config.is_local:
         return LocalHashEmbedder()
-    if config.embeddings == "gemini" or config.has_api_key:
+    if config.embeddings == "gemini" or config.has_api_key or config.is_gcloud:
         return GeminiEmbedder(llm or build_llm(config))
     return LocalHashEmbedder()
 

@@ -33,6 +33,7 @@ class RunResult:
     plan_text: str = ""
     changes: list[dict[str, Any]] = field(default_factory=list)
     review: dict[str, Any] = field(default_factory=dict)
+    evaluation: dict[str, Any] = field(default_factory=dict)
     tests: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
     session_id: str | None = None
@@ -224,7 +225,7 @@ class OrionEngine:
         if run_config.session_persist:
             try:
                 session_store = SessionStore(run_config)
-                session = session_store.create(task, run_mode, run_config.model)
+                session = session_store.create(task, run_mode, run_config.active_model)
             except Exception as exc:
                 emit({"type": "warning", "message": f"Session persistence disabled: {exc}"})
 
@@ -244,7 +245,7 @@ class OrionEngine:
                 "type": "start",
                 "task": task,
                 "mode": run_mode,
-                "model": run_config.model,
+                "model": run_config.active_model,
                 "workspace": str(run_config.workspace),
                 "session_id": result.session_id,
                 "dry_run": run_dry,
@@ -276,6 +277,7 @@ class OrionEngine:
             result.context = state.get("context") or []
             result.changes = [change.as_dict() for change in runtime.changes]
             result.review = state.get("review") or {}
+            result.evaluation = state.get("evaluation") or {}
             result.tests = state.get("test_results") or {}
             result.final = (
                 state.get("final")

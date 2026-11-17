@@ -119,10 +119,11 @@ class OrionApp(App[None]):
         self._refresh_sidebar()
         self._set_status("ready")
         self.query_one("#input", ChatInput).focus()
-        if not self.config.has_api_key:
+        if not self.config.has_credentials:
             self._note(
-                "GEMINI_API_KEY is not set. Add it to .env or run /model after "
-                "exporting it. Indexing with local embeddings still works via /index local.",
+                "Vertex AI credentials are missing. Run "
+                "'gcloud auth application-default login' and set "
+                "ORION_GCLOUD_PROJECT in .env. No API key is needed.",
                 "warning",
             )
         elif self.config.auto_index:
@@ -143,7 +144,7 @@ class OrionApp(App[None]):
                 (f"v{__version__}\n", "dim"),
                 (WELCOME + "\n\n", ""),
                 ("model  ", "dim"),
-                (self.config.model + "\n", "#22d3ee"),
+                (self.config.active_model + "\n", "#22d3ee"),
                 ("mode   ", "dim"),
                 (self.mode.upper() + "\n", "#c4b5fd"),
                 ("dir    ", "dim"),
@@ -186,7 +187,7 @@ class OrionApp(App[None]):
         info.update(
             Text.assemble(
                 ("  ", ""),
-                (self.config.model, "#22d3ee"),
+                (self.config.active_model, "#22d3ee"),
                 ("  ·  ", "#374151"),
                 (f"approval {approval}", "#9ca3af"),
                 ("  ·  ", "#374151"),
@@ -228,7 +229,7 @@ class OrionApp(App[None]):
         lines.append("SESSION\n", style="bold #6b7280")
         lines.append(f"mode     {self.mode}\n", style="#9ca3af")
         lines.append(f"approval {self.config.approval}\n", style="#9ca3af")
-        lines.append(f"model    {self.config.model}\n", style="#9ca3af")
+        lines.append(f"model    {self.config.active_model}\n", style="#9ca3af")
         lines.append(f"session  {(self._session_id or '—')[-16:]}\n", style="#6b7280")
         if self._last_result is not None:
             result = self._last_result
@@ -577,10 +578,10 @@ class OrionApp(App[None]):
             self._set_status(f"searching · {truncate(query, 40)}")
         elif command == "model":
             if not args:
-                self._note(f"Current model: {self.config.model}", "info")
+                self._note(f"Current model: {self.config.active_model}", "info")
                 return
             self._apply_config(model=args[0])
-            self._note(f"Model set to {args[0]}", "success")
+            self._note(f"Active model: {self.config.active_model}", "success")
         elif command == "approve":
             order = ["ask", "auto", "deny"]
             policy = order[(order.index(self.config.approval) + 1) % len(order)]
@@ -733,11 +734,12 @@ class OrionApp(App[None]):
     def _show_about(self) -> None:
         text = (
             f"**Orion AI** v{__version__}\n\n"
-            f"- model: `{self.config.model}`\n"
+            f"- provider: `{self.config.llm_provider}`\n"
+            f"- model: `{self.config.active_model}`\n"
             f"- embeddings: `{self.config.embeddings}` ({self.config.embedding_model})\n"
             f"- workspace: `{self.config.workspace}`\n"
             f"- data: `{self.config.data_path}`\n"
-            f"- api key: {self.config.masked_key}\n"
+            f"- credentials: {self.config.has_credentials} ({self.config.masked_key})\n"
             f"- vertex: {self.config.vertex_enabled}"
         )
         self._after_mount(AssistantMessage(agent="orion", text=text)).finalize()
@@ -748,7 +750,7 @@ class OrionApp(App[None]):
             "- `/plan` · `/build` — switch mode (Tab)\n"
             "- `/index [force] [local|gemini]` — build the code index\n"
             "- `/search <query>` — hybrid code search\n"
-            "- `/model <name>` — switch Gemini model\n"
+            "- `/model <name>` — switch model (Gemini alias or local tag)\n"
             "- `/approve` — cycle ask → auto → deny\n"
             "- `/sessions` — recent sessions\n"
             "- `/diff` — changes from the last run\n"
