@@ -43,7 +43,7 @@ From a built wheel:
 ```bash
 pip install orion_ai-1.0.1-py3-none-any.whl
 # or directly from GitHub:
-pip install https://github.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/raw/main/dist/orion_ai-1.0.1-py3-none-any.whl
+pip install https://raw.githubusercontent.com/rajbasnet123789/CLI_BASED_MULTI-RL-AGENTS/main/dist/orion_ai-1.0.1-py3-none-any.whl
 ```
 
 If you already have an older Orion installed, use
