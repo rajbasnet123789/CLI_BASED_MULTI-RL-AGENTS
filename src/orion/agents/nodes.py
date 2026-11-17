@@ -25,7 +25,7 @@ from orion.agents.state import AgentState
 from orion.approval import ApprovalCallback
 from orion.config import Mode, OrionConfig
 from orion.errors import CancelledError, LLMError
-from orion.llm import GeminiLLM, LLMResponse, Usage
+from orion.llm import LLM, LLMResponse, Usage
 from orion.rag.retriever import CodeRetriever
 from orion.tools.base import FileChange, ToolContext
 from orion.tools.registry import ToolRegistry, changes_diff
@@ -40,7 +40,7 @@ class AgentRuntime:
     """Mutable per-run state shared by the nodes."""
 
     config: OrionConfig
-    llm: GeminiLLM
+    llm: LLM
     registry: ToolRegistry
     retriever: CodeRetriever | None = None
     emit: EventCallback = lambda event: None

@@ -1,8 +1,9 @@
 """Embedding backends for the code index.
 
-Gemini embeddings are the default. A deterministic local hashing embedder keeps
-Orion usable offline (and makes tests fast) without pretending to be a neural
-model.
+Gemini embeddings are the default for the Gemini provider. A deterministic local
+hashing embedder keeps Orion usable offline (and makes tests fast) without
+pretending to be a neural model. Local LLM mode always uses that offline
+embedder, so no embedding API call is ever made.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Protocol, runtime_checkable
 
 from orion.config import OrionConfig
 from orion.errors import RAGError
-from orion.llm import EMBEDDING_DIMENSIONS, GeminiLLM
+from orion.llm import EMBEDDING_DIMENSIONS, LLM, build_llm
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}|[0-9]+")
 _STOPWORDS = {
@@ -42,7 +43,7 @@ class GeminiEmbedder:
 
     def __init__(
         self,
-        llm: GeminiLLM,
+        llm: LLM,
         model: str | None = None,
         dimensions: int = EMBEDDING_DIMENSIONS,
     ) -> None:
@@ -84,8 +85,8 @@ class LocalHashEmbedder:
     """Deterministic hashed bag-of-words / trigram embedder.
 
     Good enough for smoke tests, offline demos, and small repositories. It is
-    *not* a replacement for a trained embedding model, so Orion defaults to
-    Gemini embeddings whenever a key is available.
+    *not* a replacement for a trained embedding model, so Orion only defaults to
+    Gemini embeddings when the Gemini provider and a key are both configured.
     """
 
     dimensions = 512
@@ -127,19 +128,19 @@ class LocalHashEmbedder:
         return self._vector(text)
 
 
-def build_embedder(config: OrionConfig, llm: GeminiLLM | None = None) -> Embedder:
+def build_embedder(config: OrionConfig, llm: LLM | None = None) -> Embedder:
     """Pick the configured embedding backend."""
-    if config.embeddings == "local":
+    if config.embeddings == "local" or config.is_local:
         return LocalHashEmbedder()
     if config.embeddings == "gemini" or config.has_api_key:
-        return GeminiEmbedder(llm or GeminiLLM(config))
+        return GeminiEmbedder(llm or build_llm(config))
     return LocalHashEmbedder()
 
 
 def embedder_from_name(
     config: OrionConfig,
     name: str,
-    llm: GeminiLLM | None = None,
+    llm: LLM | None = None,
 ) -> Embedder | None:
     """Recreate the embedder that produced an existing index.
 
@@ -152,6 +153,11 @@ def embedder_from_name(
     if name == LocalHashEmbedder.name or name.startswith("local-hash"):
         return LocalHashEmbedder()
     if name.startswith("gemini:"):
+        if config.is_local:
+            # A Gemini-built index is incompatible with offline vectors; return
+            # None so the retriever falls back to lexical search instead of
+            # making a Gemini embedding call in local mode.
+            return None
         parts = name.split(":")
         model = parts[1] if len(parts) > 1 and parts[1] else None
         dimensions = EMBEDDING_DIMENSIONS
@@ -160,7 +166,7 @@ def embedder_from_name(
                 dimensions = int(parts[2])
             except ValueError:
                 pass
-        return GeminiEmbedder(llm or GeminiLLM(config), model=model, dimensions=dimensions)
+        return GeminiEmbedder(llm or build_llm(config), model=model, dimensions=dimensions)
     return None
 
 

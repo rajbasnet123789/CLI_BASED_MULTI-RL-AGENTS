@@ -8,14 +8,40 @@ Orion reads configuration from, in order of increasing priority:
 4. `ORION_*` environment variables.
 5. Explicit constructor arguments or CLI flags.
 
-The key itself may be supplied as `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
+The Gemini key itself may be supplied as `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
 `ORION_GEMINI_API_KEY`.
+
+## LLM provider
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ORION_LLM_PROVIDER` | `gemini` | `gemini` uses `google-genai`; `local` uses an OpenAI-compatible endpoint (Ollama) and needs no key. |
+| `ORION_LOCAL_BASE_URL` | `http://localhost:11434/v1` | Ollama's OpenAI-compatible base URL. |
+| `ORION_LOCAL_MODEL` | `qwen2.5:7b-instruct` | Model tag sent to the local server. Use `qwen2.5:3b-instruct` on smaller GPUs. |
+| `ORION_LOCAL_API_KEY` | — | Optional bearer token if your local gateway requires one. |
+| `ORION_LOCAL_TIMEOUT` | `120` | Request timeout in seconds. |
+
+In `local` mode Orion posts to `{ORION_LOCAL_BASE_URL}/chat/completions`, converts
+tool calls to/from the OpenAI function-call shape, and uses the offline hash
+embedder. `ORION_MODEL` keeps its Gemini default for backwards compatibility;
+local mode substitutes `ORION_LOCAL_MODEL` whenever the configured model is a
+Gemini name or alias. **No API key or embedding API call is needed.**
+
+```bash
+ollama pull qwen2.5:7b-instruct
+```
+
+```dotenv
+ORION_LLM_PROVIDER=local
+ORION_LOCAL_BASE_URL=http://localhost:11434/v1
+ORION_LOCAL_MODEL=qwen2.5:7b-instruct
+```
 
 ## Credentials
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | — | Google AI Studio (`AIza...`) or Vertex express (`AQ....`). |
+| `GEMINI_API_KEY` | — | Google AI Studio (`AIza...`) or Vertex express (`AQ....`); Gemini provider only. |
 | `ORION_VERTEX` | `auto` | `auto` detects from the key prefix; `true`/`false` force the mode. |
 
 In `auto` mode Orion infers the backend from the key prefix: `AQ.` keys use
@@ -31,7 +57,7 @@ skip the extra round trip.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ORION_MODEL` | `gemini-3.5-flash` | Default for every agent. Aliases: `flash`, `pro`, `flash-lite`, `3.5-flash`, `3.5-flash-lite`, `3.1-pro`, `2.5-flash`, `2.5-flash-lite`, `2.5-pro`, `2.0-flash`. |
+| `ORION_MODEL` | `gemini-3.5-flash` | Default for every agent in Gemini mode. Aliases: `flash`, `pro`, `flash-lite`, `3.5-flash`, `3.5-flash-lite`, `3.1-pro`, `2.5-flash`, `2.5-flash-lite`, `2.5-pro`, `2.0-flash`. Local mode uses `ORION_LOCAL_MODEL`. |
 | `ORION_PLANNER_MODEL` | unset | Override for the planner. |
 | `ORION_CODER_MODEL` | unset | Override for the coder. |
 | `ORION_REVIEWER_MODEL` | unset | Override for the reviewer. |
@@ -56,14 +82,15 @@ skip the extra round trip.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ORION_EMBEDDINGS` | `auto` | `gemini`, `local`, or `auto` (Gemini when a key exists, otherwise local). |
+| `ORION_EMBEDDINGS` | `auto` | `gemini`, `local`, or `auto` (Gemini when the provider is Gemini and a key exists, otherwise local). Local provider always uses `local`. |
 | `ORION_TOP_K` | `8` | Chunks retrieved per run (`1`–`50`). |
 | `ORION_CHUNK_CHARS` | `1200` | Chunk size (minimum `200`). |
 | `ORION_CHUNK_OVERLAP` | `150` | Must be smaller than `ORION_CHUNK_CHARS`. |
 | `ORION_MAX_FILE_BYTES` | `512000` | Skip larger files. |
 
 The offline `local` embedder is deterministic and requires no API key, which is
-useful for tests, air-gapped machines, and CI.
+useful for tests, air-gapped machines, and CI. It is automatically selected when
+`ORION_LLM_PROVIDER=local`, even if `ORION_EMBEDDINGS=gemini` is set.
 
 ## Storage and paths
 
@@ -87,6 +114,8 @@ useful for tests, air-gapped machines, and CI.
 orion config show                 # effective values (secrets masked)
 orion config show --json
 orion config set ORION_MODEL gemini-3.1-pro-preview
+orion config set ORION_LLM_PROVIDER local
+orion config set ORION_LOCAL_MODEL qwen2.5:7b-instruct
 orion config set ORION_APPROVAL auto --file .env
 orion config path                 # where Orion looks for .env
 ```
@@ -104,6 +133,13 @@ config = OrionConfig.load(
     model="gemini-3.1-pro-preview",
     approval="auto",
     embeddings="local",
+)
+
+local = OrionConfig.load(
+    workspace="~/code/project",
+    llm_provider="local",
+    local_model="qwen2.5:7b-instruct",
+    approval="auto",
 )
 ```
 

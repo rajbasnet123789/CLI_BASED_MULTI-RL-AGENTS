@@ -14,7 +14,7 @@ from orion.agents.nodes import AgentRuntime
 from orion.approval import ApprovalCallback, build_approval
 from orion.config import Mode, OrionConfig
 from orion.errors import CancelledError
-from orion.llm import GeminiLLM
+from orion.llm import LLM, build_llm
 from orion.rag.embeddings import build_embedder
 from orion.rag.indexer import IndexStats
 from orion.rag.retriever import CodeRetriever
@@ -57,11 +57,11 @@ class OrionEngine:
     def __init__(
         self,
         config: OrionConfig,
-        llm: GeminiLLM | None = None,
+        llm: LLM | None = None,
         approval: ApprovalCallback | None = None,
     ) -> None:
         self.config = config
-        self.llm = llm or GeminiLLM(config)
+        self.llm = llm or build_llm(config)
         self.approval = approval
         self.retriever: CodeRetriever | None = None
         self.registry: ToolRegistry | None = None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 from types import SimpleNamespace
 
 from orion.config import OrionConfig
@@ -9,7 +11,9 @@ from orion.llm import (
     FunctionCall,
     GeminiLLM,
     LLMResponse,
+    LocalLLM,
     Usage,
+    build_llm,
     normalize_model,
 )
 
@@ -190,3 +194,150 @@ def test_mode_mismatch_markers(config: OrionConfig) -> None:
     message = str(llm._error_for(second))
     assert "both Vertex AI and the Gemini API" in message
     assert "Detected-mode error" in message
+
+
+class _FakeOpener:
+    """Minimal urllib opener stand-in that records the request and returns bytes."""
+
+    def __init__(self, payload: object) -> None:
+        if isinstance(payload, bytes):
+            self.body = payload
+        elif isinstance(payload, str):
+            self.body = payload.encode("utf-8")
+        else:
+            self.body = json.dumps(payload).encode("utf-8")
+        self.request: object | None = None
+
+    def open(self, request: object, timeout: float | None = None) -> io.BytesIO:
+        self.request = request
+        return io.BytesIO(self.body)
+
+
+def _local_config(config: OrionConfig) -> OrionConfig:
+    return config.with_overrides(
+        llm_provider="local",
+        local_model="qwen2.5:7b-instruct",
+        local_base_url="http://localhost:11434/v1",
+    )
+
+
+def test_build_llm_selects_provider(config: OrionConfig) -> None:
+    assert isinstance(build_llm(config), GeminiLLM)
+    local = build_llm(_local_config(config))
+    assert isinstance(local, LocalLLM)
+    assert local.model == "qwen2.5:7b-instruct"
+    assert local.active_backend == "ollama"
+    assert local.mode_switched is False
+
+
+def test_local_message_conversion(config: OrionConfig) -> None:
+    llm = LocalLLM(_local_config(config))
+    messages = llm._to_messages(
+        [
+            {"role": "user", "text": "hello"},
+            {
+                "role": "model",
+                "text": "reading",
+                "function_calls": [
+                    {"name": "read_file", "args": {"path": "a.py"}, "id": "call-1"}
+                ],
+            },
+            {
+                "role": "tool",
+                "function_responses": [
+                    {"name": "read_file", "id": "call-1", "response": {"ok": True}}
+                ],
+            },
+        ],
+        system="be brief",
+    )
+    assert messages[0] == {"role": "system", "content": "be brief"}
+    assert messages[1] == {"role": "user", "content": "hello"}
+    assert messages[2]["role"] == "assistant"
+    tool_call = messages[2]["tool_calls"][0]
+    assert tool_call["id"] == "call-1"
+    assert tool_call["function"]["name"] == "read_file"
+    assert json.loads(tool_call["function"]["arguments"]) == {"path": "a.py"}
+    assert messages[3] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": '{"ok": true}',
+    }
+
+
+def test_local_generate_parses_tools_and_usage(config: OrionConfig) -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": "ok",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path": "a.py"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+    }
+    opener = _FakeOpener(payload)
+    llm = LocalLLM(_local_config(config), client=opener)
+    response = llm.generate(
+        [{"role": "user", "text": "hi"}],
+        system="sys",
+        tools=[{"name": "read_file", "description": "Read", "parameters": {"type": "object"}}],
+        response_mime_type="application/json",
+    )
+    assert response.text == "ok"
+    assert response.function_calls[0].name == "read_file"
+    assert response.function_calls[0].args == {"path": "a.py"}
+    assert response.prompt_tokens == 10
+    assert llm.usage.output_tokens == 3
+
+    request = opener.request
+    assert request is not None
+    body = json.loads(request.data.decode("utf-8"))  # type: ignore[attr-defined]
+    assert body["model"] == "qwen2.5:7b-instruct"
+    assert body["stream"] is False
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["tools"][0]["type"] == "function"
+
+
+def test_local_stream_yields_sse_content(config: OrionConfig) -> None:
+    first = {"choices": [{"delta": {"content": "Hel"}}]}
+    second = {"choices": [{"delta": {"content": "lo"}}], "usage": {"prompt_tokens": 4}}
+    sse = (
+        f"data: {json.dumps(first)}\n\n"
+        f"data: {json.dumps(second)}\n\n"
+        "data: [DONE]\n\n"
+    )
+    llm = LocalLLM(_local_config(config), client=_FakeOpener(sse))
+    assert "".join(llm.stream([{"role": "user", "text": "hi"}])) == "Hello"
+    assert llm.usage.calls == 1
+    assert llm.usage.prompt_tokens == 4
+
+
+def test_local_embed_is_offline(config: OrionConfig) -> None:
+    llm = LocalLLM(_local_config(config), client=_FakeOpener({}))
+    vectors = llm.embed(["hello world"])
+    assert len(vectors) == 1
+    assert len(vectors[0]) == 512
+    assert llm.embed([]) == []
+
+
+def test_local_error_hints(config: OrionConfig) -> None:
+    llm = LocalLLM(_local_config(config))
+    offline = llm._wrap_error(
+        RuntimeError("Connection refused"), model=llm.model, base_url=llm.base_url
+    )
+    assert "Ollama" in str(offline)
+    missing = llm._wrap_error(
+        RuntimeError("404 model not found"), model=llm.model, base_url=llm.base_url
+    )
+    assert "ollama pull" in str(missing)

@@ -64,6 +64,28 @@ def test_require_api_key(workspace: Path) -> None:
         config.require_api_key()
 
 
+def test_local_provider_needs_no_api_key(workspace: Path) -> None:
+    config = OrionConfig(
+        _env_file=None,
+        workspace=workspace,
+        llm_provider="local",
+        gemini_api_key=None,
+    )
+    assert config.is_local is True
+    assert config.has_api_key is False
+    assert config.has_credentials is True
+    assert config.require_credentials() == config.local_model
+    described = config.describe()
+    assert described["llm_provider"] == "local"
+    assert described["local_model"] == config.local_model
+    assert described["has_credentials"] is True
+
+    gemini = OrionConfig(_env_file=None, workspace=workspace, gemini_api_key=None)
+    assert gemini.has_credentials is False
+    with pytest.raises(ConfigError):
+        gemini.require_credentials()
+
+
 def test_validation_rejects_bad_values(workspace: Path) -> None:
     with pytest.raises(ValidationError):
         OrionConfig(_env_file=None, workspace=workspace, temperature=9)

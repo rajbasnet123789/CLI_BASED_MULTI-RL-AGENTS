@@ -1,17 +1,27 @@
-"""Gemini client wrapper used by the agents and the embedding pipeline.
+"""LLM backends used by the agents and the embedding pipeline.
 
-Orion talks to Gemini through the official ``google-genai`` SDK. Both Google AI
-Studio keys (``AIza...``) and Vertex AI express-mode keys (``AQ....``) are
-supported. In ``auto`` mode the mode is inferred from the key prefix and, if
-that guess is rejected, Orion retries once with the other backend. Set
-``ORION_VERTEX=true``/``false`` to pin a mode.
+Two providers are supported:
+
+* ``gemini`` (default) talks to Gemini through the official ``google-genai``
+  SDK. Both Google AI Studio keys (``AIza...``) and Vertex AI express-mode keys
+  (``AQ....``) are supported. In ``auto`` mode the mode is inferred from the key
+  prefix and, if that guess is rejected, Orion retries once with the other
+  backend. Set ``ORION_VERTEX=true``/``false`` to pin a mode.
+* ``local`` talks to any OpenAI-compatible local server (Ollama by default).
+  It needs no API key and uses the offline hash embedder for retrieval.
+
+Both backends expose the same small interface: ``generate``, ``stream``,
+``embed``, ``ping``, ``usage``, and ``active_backend``.
 """
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -616,12 +626,408 @@ class GeminiLLM:
         return LLMError(f"Gemini request failed: {message}")
 
 
+def _tool_call_id(call: dict[str, Any], index: int) -> str:
+    """Stable id used to pair assistant tool calls with tool responses."""
+    value = call.get("id") or call.get("name")
+    return str(value) if value else f"call-{index}"
+
+
+def _json_content(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+class LocalLLM:
+    """OpenAI-compatible local backend (Ollama by default).
+
+    Speaks ``POST {base_url}/chat/completions`` with the same message/tool
+    shapes as the OpenAI API. No key is sent unless ``ORION_LOCAL_API_KEY`` is
+    set (useful for local gateways that still require a token). Embeddings are
+    handled by the deterministic offline hash embedder, so enabling this backend
+    never makes an embedding API call.
+    """
+
+    def __init__(
+        self,
+        config: OrionConfig,
+        model: str | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.config = config
+        self.model = self._resolve_model(model or config.local_model)
+        self.embedding_model = "local-hash-v1"
+        self.base_url = config.local_base_url.strip().rstrip("/")
+        self._opener = client
+        self._mode_switched = False
+        self.usage = Usage()
+
+    # ------------------------------------------------------------------
+    # Plumbing
+    # ------------------------------------------------------------------
+    def _resolve_model(self, name: str | None) -> str:
+        candidate = normalize_model(name or "")
+        # ORION_MODEL keeps its Gemini default for backwards compatibility; in
+        # local mode that value is only a sentinel meaning "use local_model".
+        if not candidate or candidate.startswith("gemini-"):
+            return self.config.local_model
+        return candidate
+
+    @property
+    def chat_url(self) -> str:
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
+    @property
+    def active_backend(self) -> str:
+        lowered = self.base_url.lower()
+        return "ollama" if "11434" in lowered or "ollama" in lowered else "openai-compatible"
+
+    @property
+    def mode_switched(self) -> bool:
+        """Local mode never falls back to a different provider."""
+        return False
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        key = self.config.local_api_key_value
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        return headers
+
+    def _post(self, payload: dict[str, Any], *, model: str) -> Any:
+        request = urllib.request.Request(
+            self.chat_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        opener = self._opener or urllib.request.build_opener()
+        try:
+            return opener.open(request, timeout=self.config.local_timeout)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace").strip()
+            except Exception:  # pragma: no cover - defensive for custom openers
+                detail = ""
+            raise self._wrap_error(
+                RuntimeError(detail or f"HTTP {exc.code} {exc.reason}"),
+                model=model,
+                base_url=self.base_url,
+            ) from exc
+        except OSError as exc:  # URLError and socket errors both subclass OSError
+            raise self._wrap_error(exc, model=model, base_url=self.base_url) from exc
+
+    # ------------------------------------------------------------------
+    # Message conversion
+    # ------------------------------------------------------------------
+    def _to_messages(
+        self,
+        messages: Sequence[dict[str, Any]],
+        system: str | None = None,
+    ) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        if system:
+            converted.append({"role": "system", "content": system})
+
+        for message in messages:
+            role = "assistant" if message.get("role") in {"model", "assistant"} else "user"
+            text = str(message.get("text") or "")
+            calls = list(message.get("function_calls") or [])
+            responses = list(message.get("function_responses") or [])
+
+            if calls:
+                tool_calls = [
+                    {
+                        "id": _tool_call_id(call, index),
+                        "type": "function",
+                        "function": {
+                            "name": str(call.get("name") or ""),
+                            "arguments": _json_content(call.get("args") or {}),
+                        },
+                    }
+                    for index, call in enumerate(calls)
+                ]
+                converted.append(
+                    {"role": "assistant", "content": text, "tool_calls": tool_calls}
+                )
+            elif text:
+                converted.append({"role": role, "content": text})
+
+            for index, response in enumerate(responses):
+                payload = response.get("response")
+                if not isinstance(payload, (dict, list)):
+                    payload = {"result": payload}
+                converted.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": _tool_call_id(response, index),
+                        "content": _json_content(payload),
+                    }
+                )
+        return converted
+
+    @staticmethod
+    def _build_tools(tools: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if not tools:
+            return None
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters") or {"type": "object"},
+                },
+            }
+            for tool in tools
+            if tool.get("name")
+        ] or None
+
+    @staticmethod
+    def _usage_from(raw: dict[str, Any]) -> tuple[int, int]:
+        usage = raw.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+        prompt = usage.get("prompt_tokens") or usage.get("prompt_eval_count") or 0
+        output = usage.get("completion_tokens") or usage.get("eval_count") or 0
+        try:
+            return int(prompt or 0), int(output or 0)
+        except (TypeError, ValueError):  # pragma: no cover - malformed server response
+            return 0, 0
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def generate(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        system: str | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        response_mime_type: str | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        """Run one non-streaming generation, including any tool calls."""
+        model_name = self._resolve_model(model or self.model)
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": self._to_messages(messages, system),
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "stream": False,
+        }
+        tool_objects = self._build_tools(tools)
+        if tool_objects:
+            payload["tools"] = tool_objects
+        if response_mime_type:
+            payload["response_format"] = {"type": "json_object"}
+
+        with self._post(payload, model=model_name) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        try:
+            raw = json.loads(body)
+        except ValueError as exc:
+            raise LLMError(
+                f"Local model at {self.base_url} returned non-JSON data: "
+                f"{truncate_for_error(body)}"
+            ) from exc
+        result = self._parse_response(raw, model_name)
+        self.usage.add(result.prompt_tokens, result.output_tokens)
+        return result
+
+    def stream(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        system: str | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        model: str | None = None,
+    ) -> Iterator[str]:
+        """Yield text chunks from a streaming generation (tools disabled)."""
+        model_name = self._resolve_model(model or self.model)
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": self._to_messages(messages, system),
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "stream": True,
+        }
+        emitted = False
+        with self._post(payload, model=model_name) as response:
+            for raw_line in response:
+                line = (
+                    raw_line.decode("utf-8", errors="replace")
+                    if isinstance(raw_line, bytes)
+                    else str(raw_line)
+                ).strip()
+                if not line.startswith("data:"):
+                    continue
+                data_part = line[5:].strip()
+                if data_part == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_part)
+                except ValueError:
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                if chunk.get("error"):
+                    raise self._wrap_error(
+                        RuntimeError(str(chunk["error"])),
+                        model=model_name,
+                        base_url=self.base_url,
+                    )
+                prompt, output = self._usage_from(chunk)
+                if prompt or output:
+                    self.usage.add(prompt, output, calls=0)
+                choices = chunk.get("choices") or []
+                for choice in choices:
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content") or ""
+                    if text:
+                        emitted = True
+                        yield text
+        if emitted:
+            self.usage.calls += 1
+
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        task_type: str = "RETRIEVAL_DOCUMENT",
+        output_dimensionality: int = EMBEDDING_DIMENSIONS,
+    ) -> list[list[float]]:
+        """Embed locally with the offline hash embedder (no API calls)."""
+        if not texts:
+            return []
+        # Imported lazily: rag.embeddings imports this module at import time.
+        from orion.rag.embeddings import LocalHashEmbedder
+
+        return LocalHashEmbedder().embed_documents([str(text) for text in texts])
+
+    def ping(self) -> str:
+        """Cheap connectivity check used by ``orion doctor``."""
+        response = self.generate(
+            [{"role": "user", "text": "Reply with the single word: ready"}],
+            max_output_tokens=64,
+            temperature=0.0,
+        )
+        return (response.text or "").strip() or "connected"
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _parse_response(self, raw: Any, model_name: str) -> LLMResponse:
+        if not isinstance(raw, dict):
+            raise LLMError(f"Local model returned an unexpected response: {raw!r}")
+        if raw.get("error"):
+            raise self._wrap_error(
+                RuntimeError(str(raw["error"])),
+                model=model_name,
+                base_url=self.base_url,
+            )
+        choices = raw.get("choices") or []
+        message = choices[0].get("message") if choices else (raw.get("message") or {})
+        if not isinstance(message, dict):
+            message = {}
+        text = message.get("content") or ""
+
+        calls: list[FunctionCall] = []
+        for index, tool_call in enumerate(message.get("tool_calls") or []):
+            function = tool_call.get("function") or {}
+            name = function.get("name") or ""
+            args = function.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except ValueError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {"value": args}
+            calls.append(
+                FunctionCall(
+                    name=str(name),
+                    args=args,
+                    id=str(tool_call.get("id") or name or f"call-{index}"),
+                )
+            )
+
+        prompt, output = self._usage_from(raw)
+        return LLMResponse(
+            text=str(text).strip(),
+            function_calls=[call for call in calls if call.name],
+            prompt_tokens=prompt,
+            output_tokens=output,
+            model=model_name,
+            raw=raw,
+        )
+
+    @staticmethod
+    def _wrap_error(exc: Exception, *, model: str, base_url: str) -> LLMError:
+        text = str(exc)
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "connection refused",
+                "name or service not known",
+                "timed out",
+                "timeout",
+                "unreachable",
+                "cannot reach",
+            )
+        ):
+            hint = (
+                f"Cannot reach the local model server at {base_url}. "
+                "Start Ollama first (for example: ollama serve), then retry."
+            )
+        elif "404" in text or "not found" in lowered:
+            hint = (
+                f"Model '{model}' was not found by the local server. "
+                f"Pull it with: ollama pull {model}"
+            )
+        elif "400" in text and ("tool" in lowered or "function" in lowered):
+            hint = (
+                f"The local model '{model}' rejected tool calling. Use a tool-capable "
+                "model such as qwen2.5:7b-instruct, or reduce the tool schema."
+            )
+        else:
+            hint = f"Local model request failed for '{model}'."
+        return LLMError(f"{hint}\n\nDetails: {text}")
+
+
+def truncate_for_error(text: str, limit: int = 300) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+LLM = GeminiLLM | LocalLLM
+
+
+def build_llm(config: OrionConfig, *, client: Any | None = None) -> LLM:
+    """Create the configured LLM backend.
+
+    ``client`` is an optional injected client/opener used by tests.
+    """
+    if config.llm_provider == "local":
+        return LocalLLM(config, client=client)
+    return GeminiLLM(config, client=client)
+
+
 __all__ = [
     "EMBEDDING_DIMENSIONS",
+    "LLM",
     "MODEL_ALIASES",
     "FunctionCall",
     "GeminiLLM",
     "LLMResponse",
+    "LocalLLM",
     "Usage",
+    "build_llm",
     "normalize_model",
 ]

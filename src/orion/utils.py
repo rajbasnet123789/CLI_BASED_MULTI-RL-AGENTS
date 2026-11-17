@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 UTC = timezone.utc  # datetime.UTC was added in Python 3.11; support 3.10 too.
-from typing import Any
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+.-]*\s*\n(.*?)\n```\s*$", re.DOTALL)
 

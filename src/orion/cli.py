@@ -53,8 +53,9 @@ app = typer.Typer(
     rich_markup_mode="rich",
     no_args_is_help=False,
     help=(
-        "Orion AI - a multi-agent coding assistant powered by Gemini, LangGraph, "
-        "and ChromaDB. Run without arguments to open the interactive UI."
+        "Orion AI - a multi-agent coding assistant powered by Gemini or a local "
+        "Ollama model, LangGraph, and ChromaDB. Run without arguments to open "
+        "the interactive UI."
     ),
 )
 config_app = typer.Typer(help="Show or update Orion configuration.")
@@ -64,10 +65,17 @@ app.add_typer(session_app, name="sessions")
 
 console = Console()
 ENV_TEMPLATE = """# Orion AI configuration
+# Gemini provider (default): add a key, or switch to a local model below.
 GEMINI_API_KEY=
 ORION_VERTEX=auto
 ORION_MODEL=gemini-3.5-flash
 ORION_EMBEDDING_MODEL=gemini-embedding-001
+
+# No API key needed: run Ollama locally with Qwen2.5.
+# ORION_LLM_PROVIDER=local
+# ORION_LOCAL_BASE_URL=http://localhost:11434/v1
+# ORION_LOCAL_MODEL=qwen2.5:7b-instruct
+
 ORION_MODE=build
 ORION_APPROVAL=ask
 ORION_EMBEDDINGS=auto
@@ -161,16 +169,20 @@ def _run_prompt(
         dry_run=dry_run or None,
         auto_index=False if no_index else None,
     )
-    if not config.has_api_key:
+    if not config.has_credentials:
         console.print(
             Panel(
                 Text(
-                    "GEMINI_API_KEY is not set.\n\n"
-                    f"Add it to {config.workspace / '.env'}:\n"
-                    "  GEMINI_API_KEY=your-key\n\n"
-                    "Create a key at https://aistudio.google.com/apikey"
+                    "No LLM provider is configured.\n\n"
+                    "Option 1 - local model (no API key):\n"
+                    "  ORION_LLM_PROVIDER=local\n"
+                    "  ORION_LOCAL_MODEL=qwen2.5:7b-instruct\n"
+                    "  Start Ollama, then: ollama pull qwen2.5:7b-instruct\n\n"
+                    "Option 2 - Gemini:\n"
+                    f"  Add GEMINI_API_KEY to {config.workspace / '.env'}\n"
+                    "  Create a key at https://aistudio.google.com/apikey"
                 ),
-                title="[bold red]missing API key[/bold red]",
+                title="[bold red]missing LLM credentials[/bold red]",
                 border_style="red",
             )
         )
@@ -213,7 +225,10 @@ def cli(
         None, "--workspace", "-C", help="Project directory to work in."
     ),
     model: str | None = typer.Option(
-        None, "--model", "-m", help="Override the Gemini model (aliases: flash, pro, flash-lite)."
+        None,
+        "--model",
+        "-m",
+        help="Override the model (Gemini aliases: flash, pro, flash-lite; local: model tag).",
     ),
     auto: bool = typer.Option(
         False, "--auto", "-y", help="Automatically approve shell commands."
@@ -245,7 +260,11 @@ def cli(
             Panel(
                 Text.assemble(
                     ("◆ ORION AI\n\n", "bold magenta"),
-                    ("Multi-agent coding assistant powered by Gemini + LangGraph.\n\n", ""),
+                    (
+                        "Multi-agent coding assistant powered by Gemini or local "
+                        "Ollama + LangGraph.\n\n",
+                        "",
+                    ),
                     ("orion run \"add tests for the parser\"\n", "cyan"),
                     ("orion plan \"how does auth work?\"\n", "cyan"),
                     ("orion build \"add a /health endpoint\"\n", "cyan"),
@@ -430,10 +449,13 @@ def status_cmd(
     table = Table(title="Orion status", border_style="magenta", show_header=False)
     table.add_column("key", style="dim")
     table.add_column("value")
-    labels = {"vertex": "vertex hint"}
+    labels = {"vertex": "vertex hint", "llm_provider": "provider"}
     for key in (
         "workspace",
+        "llm_provider",
         "model",
+        "local_base_url",
+        "local_model",
         "mode",
         "approval",
         "vertex_setting",
@@ -465,7 +487,9 @@ def status_cmd(
 @app.command("doctor")
 def doctor_cmd(
     ctx: typer.Context,
-    skip_ping: bool = typer.Option(False, "--skip-ping", help="Do not call the Gemini API."),
+    skip_ping: bool = typer.Option(
+        False, "--skip-ping", help="Do not call the configured LLM provider."
+    ),
 ) -> None:
     """Check the environment, dependencies, credentials, and index."""
     import importlib.util
@@ -482,28 +506,42 @@ def doctor_cmd(
     table.add_row("data dir", str(config.data_path))
     table.add_row("env files", ", ".join(str(path) for path in discover_env_files(config.workspace)) or "(none)")
 
-    key = config.api_key
-    if not key:
-        table.add_row("GEMINI_API_KEY", "[red]missing[/red]")
-    else:
-        if config.vertex == "false":
-            hint = "using AI Studio (ORION_VERTEX=false)"
-        elif config.vertex == "true":
-            hint = "using Vertex AI (ORION_VERTEX=true)"
-        elif key.startswith("AQ."):
-            hint = "AQ. prefix · Vertex first, falls back to AI Studio"
-        else:
-            hint = "using AI Studio"
-        table.add_row("GEMINI_API_KEY", f"[green]set[/green] {config.masked_key} · {hint}")
-    vertex_modes = {
-        "auto": "detect, then fall back",
-        "true": "forced on",
-        "false": "forced off",
-    }
     table.add_row(
-        "vertex setting",
-        f"{config.vertex} · {vertex_modes.get(config.vertex, config.vertex)}",
+        "llm provider",
+        "[green]local (Ollama)[/green]" if config.is_local else "gemini",
     )
+    if config.is_local:
+        table.add_row("local base url", config.local_base_url)
+        table.add_row("local model", config.local_model)
+        table.add_row(
+            "GEMINI_API_KEY",
+            "[dim]not needed[/dim]"
+            if not config.has_api_key
+            else f"[dim]set but unused ({config.masked_key})[/dim]",
+        )
+    else:
+        key = config.api_key
+        if not key:
+            table.add_row("GEMINI_API_KEY", "[red]missing[/red]")
+        else:
+            if config.vertex == "false":
+                hint = "using AI Studio (ORION_VERTEX=false)"
+            elif config.vertex == "true":
+                hint = "using Vertex AI (ORION_VERTEX=true)"
+            elif key.startswith("AQ."):
+                hint = "AQ. prefix · Vertex first, falls back to AI Studio"
+            else:
+                hint = "using AI Studio"
+            table.add_row("GEMINI_API_KEY", f"[green]set[/green] {config.masked_key} · {hint}")
+        vertex_modes = {
+            "auto": "detect, then fall back",
+            "true": "forced on",
+            "false": "forced off",
+        }
+        table.add_row(
+            "vertex setting",
+            f"{config.vertex} · {vertex_modes.get(config.vertex, config.vertex)}",
+        )
 
     for module, label in (
         ("langgraph", "langgraph"),
@@ -532,19 +570,23 @@ def doctor_cmd(
     except Exception as exc:
         table.add_row("index", f"[yellow]{exc}[/yellow]")
 
-    if not skip_ping and config.has_api_key:
+    if not skip_ping and config.has_credentials:
+        label = "local ping" if config.is_local else "gemini ping"
         try:
-            from orion.llm import GeminiLLM
+            from orion.llm import build_llm
 
-            llm = GeminiLLM(config)
+            llm = build_llm(config)
             reply = llm.ping()
-            table.add_row("gemini ping", f"[green]{truncate(reply, 60, 'reply')}[/green]")
+            table.add_row(label, f"[green]{truncate(reply, 60, 'reply')}[/green]")
             backend = llm.active_backend
             if llm.mode_switched:
                 backend += " · auto-fallback"
-            table.add_row("gemini backend", backend)
+            table.add_row(
+                "local backend" if config.is_local else "gemini backend",
+                backend,
+            )
         except Exception as exc:
-            table.add_row("gemini ping", f"[red]{truncate(str(exc), 160, 'error')}[/red]")
+            table.add_row(label, f"[red]{truncate(str(exc), 160, 'error')}[/red]")
     console.print(table)
 
 
@@ -580,8 +622,9 @@ def init_cmd(
         for path in created:
             console.print(f"  {path}")
     console.print(
-        "\nNext: add your key to [bold].env[/bold], then run [bold]orion[/bold] "
-        "or [bold]orion index[/bold]."
+        "\nNext: add GEMINI_API_KEY to [bold].env[/bold], or uncomment the "
+        "[bold]ORION_LLM_PROVIDER=local[/bold] lines to use Ollama with no key. "
+        "Then run [bold]orion doctor[/bold]."
     )
 
 

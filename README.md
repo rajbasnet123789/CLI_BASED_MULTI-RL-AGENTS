@@ -1,7 +1,8 @@
 # Orion AI
 
-**A multi-agent coding assistant for your terminal** — powered by **Gemini**,
-**LangGraph**, **ChromaDB** retrieval, and a Textual TUI.
+**A multi-agent coding assistant for your terminal** — powered by **Gemini** or
+a local **Ollama/Qwen2.5** model, **LangGraph**, **ChromaDB** retrieval, and a
+Textual TUI. No API key is required in local mode.
 
 Orion plans, edits, reviews, and tests code the way a small engineering team
 would. It runs in two modes:
@@ -64,7 +65,7 @@ docker compose run --rm orion
 cp .env.example .env
 ```
 
-Then set your key:
+**Option A — Gemini (default):** set a key.
 
 ```dotenv
 GEMINI_API_KEY=AIza...        # Google AI Studio key
@@ -75,8 +76,27 @@ GEMINI_API_KEY=AQ....         # Vertex AI express-mode key (auto-detected)
 `ORION_VERTEX=auto` detects Vertex express keys (`AQ.` prefix) automatically
 and falls back to AI Studio once if Vertex rejects the key. Some `AQ.` keys are
 AI Studio keys, so if `orion doctor` reports a Vertex permission error set
-`ORION_VERTEX=false`. See [docs/configuration.md](docs/configuration.md) for
-every option.
+`ORION_VERTEX=false`.
+
+**Option B — local model, no API key (recommended for offline use):**
+
+```bash
+# 1. Install Ollama from https://ollama.com
+ollama pull qwen2.5:7b-instruct
+ollama serve                  # skip if Ollama is already running
+```
+
+```dotenv
+# .env
+ORION_LLM_PROVIDER=local
+ORION_LOCAL_BASE_URL=http://localhost:11434/v1
+ORION_LOCAL_MODEL=qwen2.5:7b-instruct
+```
+
+Local mode always uses the offline hash embedder, so Orion makes **no embedding
+API calls**. If you have limited VRAM, use `ollama pull qwen2.5:3b-instruct` and
+set `ORION_LOCAL_MODEL` accordingly. See
+[docs/configuration.md](docs/configuration.md) for every option.
 
 ### 3. Run
 
@@ -150,6 +170,11 @@ orion index --embeddings local          # no API key required
 orion search "where is the database configured" -k 5
 orion run "summarise the architecture" --json > summary.json
 orion config set ORION_MODEL gemini-3.1-pro-preview
+
+# local, no API key
+orion config set ORION_LLM_PROVIDER local
+orion config set ORION_LOCAL_MODEL qwen2.5:7b-instruct
+orion doctor
 ```
 
 ---
@@ -249,13 +274,18 @@ The most useful settings:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | — | Google AI Studio or Vertex express key. |
-| `ORION_VERTEX` | `auto` | `auto`, `true`, or `false`. |
-| `ORION_MODEL` | `gemini-3.5-flash` | Default model. |
+| `ORION_LLM_PROVIDER` | `gemini` | `gemini` or `local` (Ollama, no key). |
+| `GEMINI_API_KEY` | — | Google AI Studio or Vertex express key (Gemini only). |
+| `ORION_VERTEX` | `auto` | `auto`, `true`, or `false` (Gemini only). |
+| `ORION_LOCAL_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible local endpoint. |
+| `ORION_LOCAL_MODEL` | `qwen2.5:7b-instruct` | Ollama model tag used in local mode. |
+| `ORION_LOCAL_API_KEY` | — | Optional bearer token for a local gateway. |
+| `ORION_LOCAL_TIMEOUT` | `120` | Request timeout in seconds. |
+| `ORION_MODEL` | `gemini-3.5-flash` | Gemini model; ignored by local mode. |
 | `ORION_PLANNER_MODEL` / `ORION_CODER_MODEL` / `ORION_REVIEWER_MODEL` | unset | Per-agent overrides. |
 | `ORION_MODE` | `build` | `build` or `plan`. |
 | `ORION_APPROVAL` | `ask` | `ask`, `auto`, or `deny`. |
-| `ORION_EMBEDDINGS` | `auto` | `gemini`, `local`, or `auto`. |
+| `ORION_EMBEDDINGS` | `auto` | `gemini`, `local`, or `auto` (local is forced in local mode). |
 | `ORION_TOP_K` | `8` | Retrieved chunks per run. |
 | `ORION_AUTO_INDEX` | `true` | Index automatically before a run. |
 | `ORION_DRY_RUN` | `false` | Never write files. |

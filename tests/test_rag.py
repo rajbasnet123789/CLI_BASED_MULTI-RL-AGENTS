@@ -30,6 +30,12 @@ def test_build_embedder_selects_local(config: OrionConfig) -> None:
     assert isinstance(embedder, LocalHashEmbedder)
 
 
+def test_local_provider_forces_offline_embeddings(config: OrionConfig) -> None:
+    local = config.with_overrides(llm_provider="local", embeddings="gemini")
+    assert local.is_local is True
+    assert isinstance(build_embedder(local), LocalHashEmbedder)
+
+
 def test_json_store_roundtrip(tmp_path: Path) -> None:
     embedder = LocalHashEmbedder()
     store = JsonVectorStore(tmp_path / "vectors")

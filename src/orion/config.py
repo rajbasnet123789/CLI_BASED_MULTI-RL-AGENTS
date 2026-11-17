@@ -23,6 +23,7 @@ Mode = Literal["build", "plan"]
 ApprovalPolicy = Literal["ask", "auto", "deny"]
 EmbeddingBackend = Literal["auto", "gemini", "local"]
 VertexMode = Literal["auto", "true", "false"]
+LLMProvider = Literal["gemini", "local"]
 
 DEFAULT_IGNORE: list[str] = [
     ".git",
@@ -150,6 +151,18 @@ class OrionConfig(BaseSettings):
     )
     vertex: VertexMode = "auto"
 
+    # LLM provider --------------------------------------------------------
+    # Gemini remains the default. "local" uses an OpenAI-compatible server such
+    # as Ollama and needs no API key.
+    llm_provider: LLMProvider = "gemini"
+    local_base_url: str = "http://localhost:11434/v1"
+    local_model: str = "qwen2.5:7b-instruct"
+    local_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ORION_LOCAL_API_KEY", "LOCAL_API_KEY"),
+    )
+    local_timeout: float = 120.0
+
     # Models --------------------------------------------------------------
     model: str = "gemini-3.5-flash"
     planner_model: str | None = None
@@ -211,6 +224,13 @@ class OrionConfig(BaseSettings):
             raise ValueError("value must be positive")
         return value
 
+    @field_validator("local_timeout")
+    @classmethod
+    def _check_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("local_timeout must be positive")
+        return value
+
     @model_validator(mode="after")
     def _check_chunks(self) -> OrionConfig:
         if self.chunk_overlap >= self.chunk_chars:
@@ -260,6 +280,22 @@ class OrionConfig(BaseSettings):
     @property
     def has_api_key(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def is_local(self) -> bool:
+        return self.llm_provider == "local"
+
+    @property
+    def local_api_key_value(self) -> str | None:
+        if self.local_api_key is None:
+            return None
+        value = self.local_api_key.get_secret_value().strip()
+        return value or None
+
+    @property
+    def has_credentials(self) -> bool:
+        """Local models need no key; Gemini does."""
+        return self.is_local or self.has_api_key
 
     @property
     def masked_key(self) -> str:
@@ -325,7 +361,11 @@ class OrionConfig(BaseSettings):
     def describe(self, include_secrets: bool = False) -> dict[str, Any]:
         """Serializable view used by ``orion config`` and the server."""
         data: dict[str, Any] = {
+            "llm_provider": self.llm_provider,
             "model": self.model,
+            "local_base_url": self.local_base_url,
+            "local_model": self.local_model,
+            "has_credentials": self.has_credentials,
             "planner_model": self.model_for("planner"),
             "coder_model": self.model_for("coder"),
             "reviewer_model": self.model_for("reviewer"),
@@ -355,9 +395,16 @@ class OrionConfig(BaseSettings):
         if not key:
             raise ConfigError(
                 "GEMINI_API_KEY is not set. Add it to .env or export it:\n"
-                "  GEMINI_API_KEY=your-key   # https://aistudio.google.com/apikey"
+                "  GEMINI_API_KEY=your-key   # https://aistudio.google.com/apikey\n"
+                "Or run fully offline with ORION_LLM_PROVIDER=local and Ollama."
             )
         return key
+
+    def require_credentials(self) -> str:
+        """Return the identifier for the active provider, or raise a clear error."""
+        if self.is_local:
+            return self.local_model
+        return self.require_api_key()
 
     def env_hint(self) -> str:
         files = discover_env_files(self.workspace)

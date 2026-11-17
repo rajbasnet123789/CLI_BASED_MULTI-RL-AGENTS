@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "orion-ai"
 version = "1.0.0"
-description = "Orion AI - a multi-agent coding assistant for your terminal, powered by Gemini, LangGraph, and ChromaDB."
+description = "Orion AI - a multi-agent coding assistant for your terminal, powered by Gemini or local Ollama models, LangGraph, and ChromaDB."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -14,6 +14,8 @@ keywords = [
   "ai",
   "coding-assistant",
   "gemini",
+  "ollama",
+  "local-llm",
   "langgraph",
   "rag",
   "chromadb",
