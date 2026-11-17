@@ -277,7 +277,7 @@ def context_node(runtime: AgentRuntime, state: AgentState) -> dict[str, Any]:
     )
     return {
         "repo_overview": overview,
-        "context": [hit.as_dict() for hit in hits],
+        "context_hits": [hit.as_dict() for hit in hits],
         "context_text": context_text,
     }
 

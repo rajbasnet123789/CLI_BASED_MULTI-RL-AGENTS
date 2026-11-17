@@ -499,7 +499,7 @@ def doctor_cmd(
     ),
 ) -> None:
     """Check the environment, dependencies, credentials, and index."""
-    import importlib.util
+    import importlib
     import platform
 
     config = _config(ctx)
@@ -574,8 +574,14 @@ def doctor_cmd(
         ("textual", "textual"),
         ("google.genai", "google-genai"),
     ):
-        found = importlib.util.find_spec(module) is not None
-        table.add_row(label, "[green]ok[/green]" if found else "[red]missing[/red]")
+        try:
+            imported = importlib.import_module(module)
+            version = getattr(imported, "__version__", "") or "ok"
+            table.add_row(label, f"[green]ok[/green] {version}")
+        except Exception as exc:
+            table.add_row(
+                label, f"[red]import failed[/red] {truncate(str(exc), 140, 'error')}"
+            )
 
     try:
         import chromadb
@@ -608,7 +614,7 @@ def doctor_cmd(
                 backend += " · auto-fallback"
             table.add_row(f"{kind} backend", backend)
         except Exception as exc:
-            table.add_row(label, f"[red]{truncate(str(exc), 160, 'error')}[/red]")
+            table.add_row(f"{kind} ping", f"[red]{truncate(str(exc), 160, 'error')}[/red]")
     console.print(table)
 
 

@@ -9,7 +9,7 @@ class AgentState(TypedDict, total=False):
     task: str
     mode: str
     repo_overview: str
-    context: list[dict[str, Any]]
+    context_hits: list[dict[str, Any]]
     context_text: str
     context_summary: str
     plan: dict[str, Any]

@@ -47,7 +47,7 @@ LOGO = """\
 """
 
 WELCOME = (
-    "Multi-agent coding assistant · Gemini + LangGraph + ChromaDB\n"
+    "Multi-agent coding assistant · Vertex AI + LangGraph + ChromaDB\n"
     "Type a task and press Enter. Tab toggles plan/build. Ctrl+P opens commands."
 )
 
@@ -231,6 +231,18 @@ class OrionApp(App[None]):
         lines.append(f"approval {self.config.approval}\n", style="#9ca3af")
         lines.append(f"model    {self.config.active_model}\n", style="#9ca3af")
         lines.append(f"session  {(self._session_id or '—')[-16:]}\n", style="#6b7280")
+        lines.append("\nAGENTS\n", style="bold #6b7280")
+        for role in (
+            "architect",
+            "generator",
+            "reviewer",
+            "evaluator",
+            "debugger",
+            "summarizer",
+        ):
+            lines.append(
+                f"  {role:11} {self.config.model_for(role)}\n", style="#6b7280"
+            )
         if self._last_result is not None:
             result = self._last_result
             lines.append("\nLAST RUN\n", style="bold #6b7280")

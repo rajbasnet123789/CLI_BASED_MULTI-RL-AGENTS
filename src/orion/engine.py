@@ -274,7 +274,7 @@ class OrionEngine:
             )
             result.plan = state.get("plan") or {}
             result.plan_text = state.get("plan_text") or ""
-            result.context = state.get("context") or []
+            result.context = state.get("context_hits") or []
             result.changes = [change.as_dict() for change in runtime.changes]
             result.review = state.get("review") or {}
             result.evaluation = state.get("evaluation") or {}

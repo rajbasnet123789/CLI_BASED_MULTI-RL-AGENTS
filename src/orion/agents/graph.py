@@ -25,7 +25,8 @@ def build_graph(runtime: AgentRuntime):
         from langgraph.graph import END, START, StateGraph
     except ImportError as exc:  # pragma: no cover - dependency is required
         raise RuntimeError(
-            "langgraph is not installed. Reinstall Orion: pip install 'orion-ai'"
+            f"langgraph could not be imported: {exc}. "
+            "Reinstall Orion: pip install --upgrade 'orion-ai'"
         ) from exc
 
     graph = StateGraph(AgentState)

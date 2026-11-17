@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 try:  # Prefer installed distribution metadata so wheels report the real version.
     __version__ = version("orion-ai")

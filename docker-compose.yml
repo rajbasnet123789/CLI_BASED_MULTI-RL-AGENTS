@@ -12,7 +12,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: orion-ai:1.0.1
+    image: orion-ai:1.0.2
     env_file:
       - .env
     environment:
@@ -30,7 +30,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: orion-ai:1.0.1
+    image: orion-ai:1.0.2
     env_file:
       - .env
     environment:
