@@ -53,6 +53,31 @@ WELCOME = (
 )
 
 
+# Graph node names -> the role shown to the user (matches the AGENTS sidebar).
+ROLE_LABELS: dict[str, str] = {
+    "context": "context",
+    "summarizer": "summarizer",
+    "planner": "architect",
+    "architect": "architect",
+    "coder": "generator",
+    "generator": "generator",
+    "reviewer": "reviewer",
+    "evaluator": "evaluator",
+    "debugger": "debugger",
+    "orion": "orion",
+}
+
+ROLE_COLORS: dict[str, str] = {
+    "context": "#9ca3af",
+    "summarizer": "#22d3ee",
+    "architect": "#a78bfa",
+    "generator": "#4ade80",
+    "reviewer": "#fbbf24",
+    "evaluator": "#f472b6",
+    "debugger": "#fb923c",
+}
+
+
 class OrionApp(App[None]):
     """Orion's opencode-style terminal interface."""
 
@@ -75,7 +100,7 @@ class OrionApp(App[None]):
         self.config = config
         self.engine = OrionEngine(config, approval=self._request_approval)
         self.mode: Mode = config.mode
-        self._running = False
+        self._run_active = False
         self._active_message: AssistantMessage | None = None
         self._active_agent: str | None = None
         self._tool_views: dict[str, ToolCallView] = {}
@@ -86,6 +111,18 @@ class OrionApp(App[None]):
         self._index_summary = ""
         self._started_at = 0.0
         self._notes_mounted = 0
+        self._current_role: str | None = None
+        self._run_files: dict[str, str] = {}
+
+    @staticmethod
+    def _role(agent: str) -> str:
+        return ROLE_LABELS.get(agent, agent)
+
+    def _role_model(self, role: str) -> str:
+        try:
+            return self.config.model_for(role)
+        except Exception:
+            return self.config.active_model
 
     # ------------------------------------------------------------------
     # Layout
@@ -212,7 +249,7 @@ class OrionApp(App[None]):
         bar.update(
             Text.assemble(
                 (" ", ""),
-                ("● " if self._running else "○ ", "#f472b6" if self._running else "#374151"),
+                ("● " if self._run_active else "○ ", "#f472b6" if self._run_active else "#374151"),
                 (self._status, "#9ca3af"),
                 ("   ", ""),
                 (index, "#6b7280"),
@@ -234,16 +271,24 @@ class OrionApp(App[None]):
         lines.append(f"session  {(self._session_id or '—')[-16:]}\n", style="#6b7280")
         lines.append("\nAGENTS\n", style="bold #6b7280")
         for role in (
+            "summarizer",
             "architect",
             "generator",
             "reviewer",
             "evaluator",
             "debugger",
-            "summarizer",
         ):
+            active = self._run_active and self._current_role == role
+            color = ROLE_COLORS.get(role, "#6b7280")
+            lines.append("▶ " if active else "  ", style=f"bold {color}")
             lines.append(
-                f"  {role:11} {self.config.model_for(role)}\n", style="#6b7280"
+                f"{role:11} {self.config.model_for(role)}\n",
+                style=f"bold {color}" if active else "#6b7280",
             )
+        if self._run_files:
+            lines.append("\nFILES THIS RUN\n", style="bold #6b7280")
+            for path, action in list(self._run_files.items())[-12:]:
+                lines.append(f"  {action:7} {path}\n", style="#4ade80")
         if self._last_result is not None:
             result = self._last_result
             lines.append("\nLAST RUN\n", style="bold #6b7280")
@@ -280,7 +325,7 @@ class OrionApp(App[None]):
         if text.startswith("/"):
             self._handle_command(text)
             return
-        if self._running:
+        if self._run_active:
             self._note("A run is already in progress. Press Ctrl+C to cancel it.", "warning")
             return
         self._messages.mount(MessageView(role="user", text=text))
@@ -307,10 +352,12 @@ class OrionApp(App[None]):
     # Runs
     # ------------------------------------------------------------------
     def _start_run(self, task: str) -> None:
-        self._running = True
+        self._run_active = True
         self._active_message = None
         self._active_agent = None
         self._tool_views.clear()
+        self._run_files = {}
+        self._current_role = None
         self._started_at = time.monotonic()
         self._set_status(f"{self.mode} · thinking")
         self._set_busy(True)
@@ -367,16 +414,26 @@ class OrionApp(App[None]):
         self._refresh_topbar()
 
     def _ev_status(self, event: dict[str, Any]) -> None:
-        agent = event.get("agent", "")
+        agent = str(event.get("agent", "") or "")
         message = event.get("message", "")
-        self._set_status(f"{agent} · {message}" if agent else str(message))
+        role = self._role(agent) if agent else ""
+        if role and role != self._current_role:
+            self._current_role = role
+            self._finalize_active()
+            if role != "orion":
+                model = self._role_model(role)
+                self._after_mount(
+                    NoteMessage(f"▶ {role} agent working · model {model}", "info")
+                )
+            self._refresh_sidebar()
+        self._set_status(f"{role} · {message}" if role else str(message))
 
     def _ev_usage(self, event: dict[str, Any]) -> None:
         self._usage = event.get("usage") or {}
         self._set_status()
 
     def _ev_token(self, event: dict[str, Any]) -> None:
-        agent = str(event.get("agent", "orion"))
+        agent = self._role(str(event.get("agent", "orion")))
         text = str(event.get("text", ""))
         if not text:
             return
@@ -390,7 +447,7 @@ class OrionApp(App[None]):
         self._scroll_end()
 
     def _ev_message(self, event: dict[str, Any]) -> None:
-        agent = str(event.get("agent", "orion"))
+        agent = self._role(str(event.get("agent", "orion")))
         text = str(event.get("text", ""))
         if not text.strip():
             return
@@ -410,7 +467,7 @@ class OrionApp(App[None]):
         text = str(event.get("text", ""))
         if not text.strip():
             return
-        agent = str(event.get("agent", "agent"))
+        agent = self._role(str(event.get("agent", "agent")))
         model = str(event.get("model", ""))
         label = f"{agent} · {model}" if model else agent
         message = AssistantMessage(agent=label, text=text)
@@ -444,6 +501,20 @@ class OrionApp(App[None]):
                 str(event.get("display") or event.get("name") or "tool"),
                 str(event.get("content") or ""),
             )
+        if event.get("ok"):
+            name = str(event.get("name", ""))
+            action = {
+                "write_file": "write",
+                "edit_file": "edit",
+                "delete_file": "delete",
+                "move_file": "move",
+            }.get(name)
+            for path in event.get("changed_paths") or []:
+                self._run_files[str(path)] = action or "change"
+                role = self._role(str(event.get("agent", "")))
+                self._note(f"✎ {role} {action or 'changed'} {path}", "success")
+            if event.get("changed_paths"):
+                self._refresh_sidebar()
         self._set_status()
 
     def _ev_diff(self, event: dict[str, Any]) -> None:
@@ -451,6 +522,12 @@ class OrionApp(App[None]):
         diff = str(event.get("diff", ""))
         if diff:
             self._after_mount(DiffView(str(event.get("path", "")), diff))
+
+    def _ev_evaluation(self, event: dict[str, Any]) -> None:
+        verdict = str(event.get("verdict", "?"))
+        summary = str(event.get("summary", ""))
+        kind = "success" if verdict == "approve" else "warning"
+        self._note(f"evaluator verdict: {verdict}. {summary}".strip(), kind)
 
     def _ev_review(self, event: dict[str, Any]) -> None:
         self._finalize_active()
@@ -499,7 +576,7 @@ class OrionApp(App[None]):
     def _ev_done(self, event: dict[str, Any]) -> None:
         self._finalize_active()
         result = event.get("result")
-        self._running = False
+        self._run_active = False
         self._set_busy(False)
         if isinstance(result, dict):
             self._last_result = RunResult(
@@ -805,7 +882,7 @@ class OrionApp(App[None]):
         self._handle_command("/new")
 
     def action_cancel_or_quit(self) -> None:
-        if self._running:
+        if self._run_active:
             self.engine.cancel()
             self._set_status("cancelling…")
             self._note("Cancelling the current run…", "warning")

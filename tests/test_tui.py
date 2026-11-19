@@ -94,3 +94,38 @@ async def test_tui_help_command(config: OrionConfig) -> None:
         assert app._messages.children
         app._handle_command("/about")
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_tui_runs_prompt_and_shows_agent_roles(
+    config: OrionConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typing a prompt must start a run and surface roles and changed files."""
+    from tests.test_engine import FakeLLM
+
+    import orion.agents.nodes as nodes
+    from orion.tui.app import OrionApp
+    from orion.tui.widgets import AssistantMessage, DiffView, NoteMessage
+
+    monkeypatch.setattr(nodes, "detect_verification_commands", lambda root: [])
+    app = OrionApp(config)
+    app.engine.llm = FakeLLM(tool_call=True)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await pilot.pause()
+        app.query_one("#input").focus()
+        await pilot.press(*"create a health helper")
+        await pilot.press("enter")
+        for _ in range(100):
+            await pilot.pause(0.2)
+            if not app._run_active and app._last_result is not None:
+                break
+        assert app._last_result is not None
+        assert app._last_result.error is None
+        assert (config.workspace / "pkg" / "generated.py").is_file()
+        assert list(app.query(DiffView))
+        agents = [str(m.agent) for m in app.query(AssistantMessage)]
+        for role in ("summarizer", "architect", "generator", "reviewer", "evaluator"):
+            assert any(a.startswith(role) for a in agents), role
+        assert "pkg/generated.py" in app._run_files
+        notes = [str(n.render()) for n in app.query(NoteMessage)]
+        assert any("generator agent working" in n for n in notes)
