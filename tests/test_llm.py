@@ -265,6 +265,11 @@ def test_gcloud_model_fallback_chain(config: OrionConfig) -> None:
     assert llm._model_candidates("glm-5-maas")[:2] == ["glm-5-maas", "gemini-3.5-flash"]
     assert llm._model_unavailable(llm._wrap_error(RuntimeError("404 NOT_FOUND")))
     assert not llm._model_unavailable(llm._wrap_error(RuntimeError("429 rate limit")))
+    denied = llm._wrap_error(RuntimeError("403 PERMISSION_DENIED billing"))
+    assert llm._model_unavailable(denied, "claude-opus-5-5")
+    assert llm._model_unavailable(denied, "glm-5-maas")
+    assert not llm._model_unavailable(denied, "gemini-3.5-flash")
+    assert not llm._model_unavailable(denied)
 
 
 def test_gcloud_backend_metadata_and_errors(config: OrionConfig) -> None:

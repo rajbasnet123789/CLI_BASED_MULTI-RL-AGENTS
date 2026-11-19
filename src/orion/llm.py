@@ -752,11 +752,19 @@ class GCloudLLM(GeminiLLM):
         return candidates
 
     @staticmethod
-    def _model_unavailable(exc: LLMError) -> bool:
+    def _model_unavailable(exc: LLMError, model: str | None = None) -> bool:
         message = str(exc).lower()
-        return any(
+        if any(
             marker in message
             for marker in ("404", "not found", "not available", "does not have access")
+        ):
+            return True
+        # Third-party Model Garden models (Claude, GLM, ...) answer 403 when the
+        # project has no access/billing for them. That is a per-model problem, so
+        # fall back to Gemini. A 403 on a Gemini model is a real project problem.
+        third_party = bool(model) and not str(model).lower().startswith("gemini")
+        return third_party and any(
+            marker in message for marker in ("403", "permission_denied", "permission denied")
         )
 
     def _invoke_model(self, call: Any, model_name: str) -> tuple[Any, str]:
@@ -768,7 +776,7 @@ class GCloudLLM(GeminiLLM):
                 return response, candidate
             except LLMError as exc:
                 is_last = index == len(candidates) - 1
-                if is_last or not self._model_unavailable(exc):
+                if is_last or not self._model_unavailable(exc, candidate):
                     raise
                 self.model_fallbacks[candidate] = candidates[index + 1]
         raise LLMError(f"No usable Vertex AI model for '{model_name}'")  # pragma: no cover
